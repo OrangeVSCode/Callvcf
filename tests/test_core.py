@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vcf_service import classify_variant, genotype_alleles, normalize_genotype, parse_loci
 from vcf_service import PurePythonVCFService
-from advanced_analysis import AdvancedAnalyzer, genotype_dosage, pairwise_r2
+from advanced_analysis import AdvancedAnalyzer, genotype_dosage, pairwise_r2, parse_region, parse_trait_directions
 
 
 class CoreTests(unittest.TestCase):
@@ -39,6 +39,8 @@ class CoreTests(unittest.TestCase):
         r2, n = pairwise_r2([0, 1, 2, None], [0, 1, 2, 0], min_samples=3)
         self.assertAlmostEqual(r2, 1.0)
         self.assertEqual(n, 3)
+        self.assertEqual(parse_region("1:10-500"), ("1", 10, 500))
+        self.assertEqual(parse_trait_directions("Yield=HIGH\nDisease=LOW"), {"Yield": 1, "Disease": -1})
 
     def test_advanced_analysis(self):
         fixtures = Path(__file__).resolve().parent / "fixtures"
@@ -58,7 +60,40 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["gene"]["matches"][0]["relation"], "CDS")
         self.assertEqual(result["function"]["vcf_info"][0]["effect"], "missense_variant")
         self.assertEqual(result["domain"]["matches"][0]["domain"], "Kinase")
-        self.assertEqual(result["phenotype"]["traits"][0]["min_p"], 0.001)
+        self.assertEqual(result["phenotype"]["traits"][0]["min_p"], 0.000001)
+        self.assertEqual(result["ld"]["heatmap"]["plotted_count"], 2)
+
+    def test_multi_lead_and_sample_profile(self):
+        fixtures = Path(__file__).resolve().parent / "fixtures"
+        analyzer = AdvancedAnalyzer(PurePythonVCFService())
+        result = analyzer.analyze({
+            "path": str(fixtures / "tiny.vcf"), "lead_locus": "1:100",
+            "lead_loci": "1:100\n1:300", "ld_mode": "multi_lead_region",
+            "region": "1:1-500", "window_kb": 1, "r2_threshold": 0.8,
+            "min_samples": 3, "heatmap_max_variants": 120,
+            "options": {"ld": True, "phenotype": True},
+            "phenotype_path": str(fixtures / "tiny.ps"),
+        })
+        self.assertEqual(result["ld"]["mode"], "multi_lead_region")
+        self.assertEqual(len(result["ld"]["lead_results"]), 2)
+        self.assertEqual(result["ld"]["linked_variant_count"], 2)
+        self.assertEqual(result["ld"]["heatmap"]["plotted_count"], 2)
+        self.assertEqual(result["ld"]["heatmap"]["matrix"][0][1], result["ld"]["heatmap"]["matrix"][1][0])
+
+        profile = analyzer.sample_lead_profile({
+            "path": str(fixtures / "tiny.vcf"), "samples": ["S2"],
+            "lead_loci": "1:100\n1:300", "phenotype_path": str(fixtures / "tiny.ps"),
+            "trait_directions": "tiny=HIGH", "significance_threshold": 0.01,
+        })
+        self.assertEqual(profile["summaries"][0]["distinct_leads"], 2)
+        self.assertEqual(profile["summaries"][0]["significant_records"], 2)
+        self.assertIsNotNone(profile["summaries"][0]["trend_index"])
+        no_direction = analyzer.sample_lead_profile({
+            "path": str(fixtures / "tiny.vcf"), "samples": ["S2"],
+            "lead_loci": "1:100", "phenotype_path": str(fixtures / "tiny.ps"),
+            "trait_directions": "", "significance_threshold": 0.01,
+        })
+        self.assertIsNone(no_direction["summaries"][0]["trend_index"])
 
 
 if __name__ == "__main__":

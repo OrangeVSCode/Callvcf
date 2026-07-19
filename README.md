@@ -85,6 +85,7 @@ ssh -L 8765:127.0.0.1:8765 user@server
    - 样本 × 位点
    - 样本全局统计
    - Lead 位点高级分析
+   - 样本 Lead-SNP 画像
 
 样本统计留空位点列表时会扫描整个 VCF。对于数百万记录的文件，这一步可能需要数分钟。
 
@@ -92,12 +93,13 @@ ssh -L 8765:127.0.0.1:8765 user@server
 
 页面中的每项功能都可以独立勾选：
 
-1. 填写一个 Lead 位点、左右窗口、`r²` 阈值和最少共同有效样本数。
-2. “LD 区段与连锁变异集”计算 Lead 与窗口内二等位变异的成对 `r²`。页面可视化全部有效点，并可复制位点或下载 TSV。
-3. “相对基因位置”需要 GFF3/GTF；“突变功能”优先读取 VCF INFO 中的 `ANN`/`CSQ`/`BCSQ`，也可补充至少含 `chr`、`pos` 的 TSV/CSV。
-4. “蛋白结构域”需要本地 TSV/CSV，表头建议含 `gene`、`gene_id`、`protein` 或 `protein_id`。
-5. “区域表型关联”接受一个 `.ps` 文件或包含多个 `.ps` 的目录，可识别常见 `marker/chr/pos/pvalue` 表头和 `chr:pos` Marker。
-6. “调用 LDBlockShow”需要填写可执行文件路径。官方程序面向 Linux/Unix/macOS；Windows 页面可勾选“通过 WSL 调用”，并填写 WSL 内的命令或路径。输出默认放在 VCF 同目录的 `CallVCF_LDBlockShow`，也可指定其他目录。
+1. “仅指定 Lead”模式填写一个 Lead 位点和左右窗口；“区间内多 Lead 联集”模式填写指定区间及该区间内的 Lead-SNP 列表。
+2. 工具计算 Lead 与区间内二等位变异的成对 `r²`。多 Lead 模式返回与任一 Lead 达到阈值的 SNP/INDEL/SV 联集、每个 Lead 的连锁跨度和每个位点对应的 Lead 列表。
+3. 页面同步绘制区域 GWAS 信号、各 Lead 连锁跨度和连锁位点间的三角形 `R²` 热图；可输出 2×/4×/6× 高清 PNG 或矢量 PDF，热图位点过多时按连锁强度抽样。
+4. “相对基因位置”需要 GFF3/GTF；“突变功能”优先读取 VCF INFO 中的 `ANN`/`CSQ`/`BCSQ`，也可补充至少含 `chr`、`pos` 的 TSV/CSV。
+5. “蛋白结构域”需要本地 TSV/CSV，表头建议含 `gene`、`gene_id`、`protein` 或 `protein_id`。
+6. “区域表型关联”接受一个 `.ps` 文件或包含多个 `.ps` 的目录，可识别常见 `marker/chr/pos/pvalue` 表头和 `chr:pos` Marker。
+7. “调用 LDBlockShow”需要填写可执行文件路径。官方程序面向 Linux/Unix/macOS；Windows 页面可勾选“通过 WSL 调用”，并填写 WSL 内的命令或路径。输出默认放在 VCF 同目录的 `CallVCF_LDBlockShow`，也可指定其他目录。
 
 注意：页面按成对 `r²` 阈值跨度给出的“工作连锁区间”，与 Gabriel、solid-spine 等正式 haplotype block 算法不是同一概念。勾选 LDBlockShow 后会同时获得软件自身的 block 判定结果。
 
@@ -108,6 +110,15 @@ LDBlockShow -InVCF input.vcf.gz -OutPut result_prefix -Region chr:start-end -Sel
 ```
 
 大型数据建议使用 BGZF 压缩且已建立索引的 VCF。若 Lead 窗口内超过 20,000 条变异，工具会提示缩小窗口，避免浏览器和内存被一次查询占满。
+
+## 样本 Lead-SNP 画像
+
+1. 在页面上方选择一个或多个样本，在画像页粘贴 Lead-SNP 列表，并选择含 `pvalue` 的 GWAS `.ps` 文件或目录。
+2. 若结果同时含 `beta` 和效应等位基因（支持 `effect_allele/EA/A1/allele1`），页面会显示样本效应剂量、群体均值、显著程度和效应方向。
+3. 可选逐行填写 `表型名=HIGH` 或 `表型名=LOW`。只有指定了有利方向的表型才计算综合趋势指数；指数按样本相对群体的效应剂量、β 方向和 `-log10(P)` 加权，范围为 -100 到 100。
+4. 画像会区分“等位基因效应方向”和“样本相对趋势”。例如不利等位基因本身方向为不利，但样本携带量低于群体均值时，样本相对趋势可以是有利。
+
+综合趋势指数用于同一 VCF 群体内的探索性比较，不应替代多环境验证、群体结构校正或育种值估计。
 
 ## VCF 建议
 

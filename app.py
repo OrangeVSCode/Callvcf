@@ -163,6 +163,8 @@ class Handler(BaseHTTPRequestHandler):
                 )
             elif route == "/api/lead-analysis":
                 result = ADVANCED.analyze(payload)
+            elif route == "/api/sample-lead-profile":
+                result = ADVANCED.sample_lead_profile(payload)
             else:
                 return self._json(404, {"ok": False, "error": "接口不存在"})
             return self._json(200, {"ok": True, "data": result})

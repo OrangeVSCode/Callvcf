@@ -87,6 +87,7 @@
         <button class="tab" data-tab="matrix" role="tab">样本 × 位点</button>
         <button class="tab" data-tab="stats" role="tab">样本全局统计</button>
         <button class="tab" data-tab="lead" role="tab">Lead 位点高级分析</button>
+        <button class="tab" data-tab="sample-lead" role="tab">样本 Lead-SNP 画像</button>
       </div>
 
       <div class="tab-pane active" id="pane-existence">
@@ -124,10 +125,14 @@
         <div class="advanced-layout">
           <div class="advanced-main">
             <div class="advanced-grid">
-              <label class="field"><span>Lead 位点</span><input id="leadLocus" type="text" placeholder="5:2538289"></label>
+              <label class="field"><span>连锁展示模式</span><select id="ldMode"><option value="single_lead">仅指定 Lead 的连锁 SNP</option><option value="multi_lead_region">区间内多 Lead 的连锁 SNP 联集</option></select></label>
+              <label class="field"><span>单 Lead 位点</span><input id="leadLocus" type="text" placeholder="5:2538289"></label>
               <label class="field"><span>左右窗口（kb）</span><input id="ldWindow" type="number" min="1" max="50000" value="500"></label>
               <label class="field"><span>连锁阈值 r²</span><input id="ldThreshold" type="number" min="0" max="1" step="0.05" value="0.6"></label>
               <label class="field"><span>最少共同有效样本</span><input id="ldMinSamples" type="number" min="3" value="20"></label>
+              <label class="field multi-lead-field hidden"><span>指定区间</span><input id="ldRegion" type="text" placeholder="5:2400000-2650000"></label>
+              <label class="field multi-lead-field hidden span-2"><span>区间内 Lead-SNP 列表</span><textarea id="leadLoci" rows="3" placeholder="5:2538289&#10;5:2591021"></textarea></label>
+              <label class="field"><span>热图最多 SNP</span><input id="heatmapMaxVariants" type="number" min="10" max="250" value="120"></label>
             </div>
             <div class="option-grid" aria-label="高级分析选项">
               <label class="check-option"><input id="optLd" type="checkbox" checked><span><b>LD 区段与连锁变异集</b><small>计算 Lead 与窗口内二等位变异的 r²</small></span></label>
@@ -154,6 +159,21 @@
         </div>
         <div class="notice">LD 区段是按“与 Lead 位点的成对 r² 阈值跨度”定义的工作区间，不等同于 Gabriel 或 solid-spine 算法的正式 haplotype block；勾选 LDBlockShow 后会同时生成软件 block 结果。</div>
         <div id="leadResult" class="result-body empty-state">等待高级分析。</div>
+      </div>
+
+      <div class="tab-pane" id="pane-sample-lead">
+        <div class="pane-intro">
+          <div><h3>样本在 Lead-SNP 中的表型趋势画像</h3><p>联合 VCF 基因型与 GWAS 的效应等位基因、β 和 P 值，显示样本携带情况、趋势与显著程度。</p></div>
+          <button class="primary" id="sampleLeadRunBtn">生成画像</button>
+        </div>
+        <div class="advanced-grid">
+          <label class="field span-2"><span>Lead-SNP 列表</span><textarea id="profileLeadLoci" rows="5" placeholder="5:2538289&#10;3:1393130"></textarea></label>
+          <label class="field"><span>表型 .ps 文件或目录</span><div class="resource-input triple"><input id="profilePhenotypePath" type="text" placeholder="单个 .ps 或目录"><button class="secondary browse-resource" data-target="profilePhenotypePath" data-kind="phenotype">文件…</button><button class="secondary browse-resource" data-target="profilePhenotypePath" data-kind="phenotype_dir">目录…</button></div></label>
+          <label class="field"><span>显著性阈值</span><input id="profilePThreshold" type="number" min="1e-300" max="1" step="any" value="0.00001"></label>
+          <label class="field span-2"><span>表型有利方向（可选）</span><textarea id="traitDirections" rows="4" placeholder="Yield=HIGH&#10;DiseaseScore=LOW"></textarea><small>HIGH 表示越高越好，LOW 表示越低越好；未填写时只展示 β 方向和显著性，不计算趋势指数。</small></label>
+        </div>
+        <div class="notice">样本从页面上方“样本选择”读取。趋势指数是相对当前 VCF 群体的加权比较，不代表跨群体或跨环境的绝对育种价值。</div>
+        <div id="sampleLeadResult" class="result-body empty-state">等待生成样本画像。</div>
       </div>
     </section>
   </main>

@@ -1,4 +1,4 @@
-const state = { metadata: null, activeTab: "existence", lastResult: null };
+const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null };
 const $ = (id) => document.getElementById(id);
 const categoryOrder = ["HOM_REF", "HET", "HOM_ALT", "MISSING", "OTHER"];
 const shortLabels = { HOM_REF: "0/0", HET: "0/1", HOM_ALT: "1/1", MISSING: "缺失", OTHER: "其他" };
@@ -267,6 +267,127 @@ function renderLdChart(ld) {
   </svg></div>`;
 }
 
+function r2Color(value) {
+  if (value == null) return "rgb(238,241,239)";
+  const v = Math.max(0, Math.min(1, Number(value)));
+  const r = Math.round(255 - 18 * (1 - v));
+  const g = Math.round(246 - 202 * v);
+  const b = Math.round(220 - 184 * v);
+  return `rgb(${r},${g},${b})`;
+}
+
+function renderRegionalLdFigure(data) {
+  const ld = data.ld, heatmap = ld?.heatmap;
+  if (!heatmap?.variants?.length) return '<div class="empty-state">达到阈值的位点不足，无法绘制 LD 热图。</div>';
+  const width = 1000, height = 620, left = 76, right = 24, plotW = width - left - right;
+  const region = ld.search_region, span = Math.max(1, region.end - region.start);
+  const x = pos => left + (pos - region.start) / span * plotW;
+  const association = (data.phenotype?.records || []).filter(r => r.chrom === region.chrom && r.pos >= region.start && r.pos <= region.end);
+  const maxLogP = Math.max(1, ...association.map(r => -Math.log10(Math.max(Number(r.pvalue), 1e-300))));
+  const assocTop = 24, assocBottom = 185, assocH = assocBottom - assocTop;
+  const assocMarks = association.slice(0, 12000).map(r => {
+    const value = -Math.log10(Math.max(Number(r.pvalue), 1e-300));
+    return `<circle cx="${x(r.pos).toFixed(2)}" cy="${(assocBottom - value / maxLogP * assocH).toFixed(2)}" r="2.2" fill="#7d9088"><title>${escapeHtml(r.trait)} · ${escapeHtml(r.marker)} · P=${r.pvalue}</title></circle>`;
+  }).join("");
+  const leads = ld.lead_results?.length ? ld.lead_results : [{lead_record: ld.lead_record, block: ld.linkage_region}];
+  const blockMarks = leads.map((item, i) => {
+    const y = 216 + (i % 3) * 13, block = item.block || ld.linkage_region;
+    return `<line x1="${x(block.start)}" x2="${x(block.end)}" y1="${y}" y2="${y}" stroke="#d14c4c" stroke-width="5" opacity=".72"><title>${escapeHtml(item.lead_record.key)} · ${block.start}-${block.end}</title></line><path d="M ${x(item.lead_record.pos)-5} ${y-9} L ${x(item.lead_record.pos)+5} ${y-9} L ${x(item.lead_record.pos)} ${y-1} Z" fill="#9f252d"/>`;
+  }).join("");
+  const variants = heatmap.variants, matrix = heatmap.matrix, n = variants.length;
+  const heatTop = 280, heatH = 270, unitX = plotW / Math.max(1, n), unitY = heatH / Math.max(1, n);
+  const cells = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j <= i; j++) {
+      const value = matrix[i]?.[j];
+      const cx = left + (i + j + 1) * unitX / 2;
+      const cy = heatTop + (i - j + 1) * unitY / 2;
+      const dx = unitX / 2 + .35, dy = unitY / 2 + .35;
+      cells.push(`<path d="M ${cx} ${cy-dy} L ${cx+dx} ${cy} L ${cx} ${cy+dy} L ${cx-dx} ${cy} Z" fill="${r2Color(value)}"><title>${escapeHtml(variants[j].key)} × ${escapeHtml(variants[i].key)} · r²=${value == null ? "NA" : value}</title></path>`);
+    }
+  }
+  const leadGuides = leads.map(item => `<line x1="${x(item.lead_record.pos)}" x2="${x(item.lead_record.pos)}" y1="${assocTop}" y2="260" stroke="#c64048" stroke-width="1.2" stroke-dasharray="6 5"/>`).join("");
+  const yTicks = [0, .25, .5, .75, 1].map(v => `<line x1="${left}" x2="${width-right}" y1="${assocBottom-v*assocH}" y2="${assocBottom-v*assocH}" stroke="#e0e7e3"/><text x="${left-10}" y="${assocBottom-v*assocH+4}" text-anchor="end" fill="#54675f">${(v*maxLogP).toFixed(maxLogP > 10 ? 0 : 1)}</text>`).join("");
+  const legend = [0, .2, .4, .6, .8, 1].map((v, i) => `<rect x="${left+i*30}" y="585" width="30" height="12" fill="${r2Color(v)}"/><text x="${left+i*30}" y="612" fill="#54675f">${v}</text>`).join("");
+  return `<div class="ld-figure-toolbar"><span>${heatmap.plotted_count} / ${heatmap.original_count} 个连锁位点${heatmap.downsampled ? "（已按连锁强度抽样）" : ""}</span><label>PNG 倍率 <select id="ldPngScale"><option>2</option><option selected>4</option><option>6</option></select></label><button class="secondary" id="exportLdPngBtn">导出高清 PNG</button><button class="secondary" id="exportLdPdfBtn">导出矢量 PDF</button></div>
+    <div class="regional-ld-figure"><svg id="regionalLdSvg" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="regionalLdTitle regionalLdDesc"><title id="regionalLdTitle">区域关联与三角形 LD 热图</title><desc id="regionalLdDesc">上部为区域 GWAS 显著性，中部为 Lead 连锁跨度，下部为连锁位点之间的成对 r²。</desc>
+      <rect width="${width}" height="${height}" fill="#ffffff"/>${yTicks}${assocMarks}${leadGuides}
+      <line x1="${left}" x2="${width-right}" y1="${assocBottom}" y2="${assocBottom}" stroke="#71827a"/>
+      <text x="18" y="110" transform="rotate(-90 18 110)" fill="#344b43">-log10(P)</text>
+      <text x="${left}" y="205" fill="#54675f">${escapeHtml(region.chrom)}:${formatNumber(region.start)}</text><text x="${width-right}" y="205" text-anchor="end" fill="#54675f">${escapeHtml(region.chrom)}:${formatNumber(region.end)}</text>
+      ${blockMarks}<text x="${left}" y="266" fill="#344b43">Lead-linked spans</text>${cells.join("")}
+      <text x="${left}" y="575" fill="#344b43">Pairwise R²</text>${legend}
+    </svg></div>`;
+}
+
+function downloadBlob(blob, name) {
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob); link.download = name; link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1500);
+}
+
+function exportLdPng() {
+  const svg = $("regionalLdSvg");
+  if (!svg) throw new Error("当前没有可导出的热图");
+  const scale = Number($("ldPngScale")?.value || 4);
+  const clone = svg.cloneNode(true), view = svg.viewBox.baseVal;
+  clone.setAttribute("width", view.width * scale); clone.setAttribute("height", view.height * scale);
+  const blob = new Blob([new XMLSerializer().serializeToString(clone)], {type: "image/svg+xml;charset=utf-8"});
+  const image = new Image(), url = URL.createObjectURL(blob);
+  image.onload = () => {
+    const canvas = document.createElement("canvas"); canvas.width = view.width * scale; canvas.height = view.height * scale;
+    const ctx = canvas.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    URL.revokeObjectURL(url); canvas.toBlob(out => downloadBlob(out, `CallVCF_LD_heatmap_${scale}x.png`), "image/png");
+  };
+  image.onerror = () => { URL.revokeObjectURL(url); toast("PNG 导出失败", true); };
+  image.src = url;
+}
+
+function pdfEscape(value) { return String(value).replace(/[\\()]/g, "\\$&"); }
+
+function exportLdPdf() {
+  const result = state.lastLeadResult, ld = result?.ld, heatmap = ld?.heatmap;
+  if (!heatmap?.variants?.length) throw new Error("当前没有可导出的热图");
+  const pageW = 842, pageH = 595, left = 58, right = 24, plotW = pageW-left-right;
+  const heatBottom = 58, heatH = 330, n = heatmap.variants.length, cellW = plotW/n, cellH = heatH/n;
+  const region = ld.search_region, regionSpan = Math.max(1, region.end-region.start), px = pos => left+(pos-region.start)/regionSpan*plotW;
+  const association = (result.phenotype?.records || []).filter(r => r.chrom===region.chrom && r.pos>=region.start && r.pos<=region.end);
+  const maxLogP = Math.max(1, ...association.map(r => -Math.log10(Math.max(Number(r.pvalue),1e-300))));
+  const commands = ["1 1 1 rg 0 0 842 595 re f", "0.15 0.22 0.19 rg", `BT /F1 15 Tf 58 572 Td (${pdfEscape("CallVCF regional association and LD")}) Tj ET`, `BT /F1 8 Tf 58 557 Td (${pdfEscape(`${region.chrom}:${region.start}-${region.end}; ${heatmap.plotted_count} linked variants; pairwise R2`)}) Tj ET`, "0.55 0.62 0.59 RG 0.6 w 58 468 m 818 468 l S"];
+  association.slice(0,12000).forEach(r => {
+    const y=468+(-Math.log10(Math.max(Number(r.pvalue),1e-300))/maxLogP)*68;
+    commands.push(`0.35 0.45 0.41 rg ${(px(r.pos)-1).toFixed(2)} ${(y-1).toFixed(2)} 2 2 re f`);
+  });
+  const leads = ld.lead_results?.length ? ld.lead_results : [{lead_record:ld.lead_record,block:ld.linkage_region}];
+  leads.forEach((item,i) => {
+    const y=445-(i%3)*5, block=item.block||ld.linkage_region, leadX=px(item.lead_record.pos);
+    commands.push(`0.78 0.22 0.25 RG 1 w ${leadX.toFixed(2)} 420 m ${leadX.toFixed(2)} 540 l S`);
+    commands.push(`0.78 0.22 0.25 RG 4 w ${px(block.start).toFixed(2)} ${y} m ${px(block.end).toFixed(2)} ${y} l S`);
+  });
+  commands.push("0.25 0.34 0.30 rg BT /F1 8 Tf 58 430 Td (Lead-linked spans) Tj ET");
+  for (let i = 0; i < n; i++) for (let j = 0; j <= i; j++) {
+    const value = heatmap.matrix[i]?.[j];
+    const v = value == null ? 0 : Math.max(0, Math.min(1, Number(value)));
+    const r = (255 - 18 * (1-v))/255, g = (246 - 202*v)/255, b = (220 - 184*v)/255;
+    commands.push(`${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} rg ${(left+j*cellW).toFixed(2)} ${(heatBottom+(n-i-1)*cellH).toFixed(2)} ${(cellW+.1).toFixed(2)} ${(cellH+.1).toFixed(2)} re f`);
+  }
+  commands.push(`0.2 0.3 0.26 RG 0.5 w ${left} ${heatBottom} ${plotW} ${heatH} re S`);
+  commands.push("0.25 0.34 0.30 rg BT /F1 8 Tf 58 42 Td (Pairwise R2: 0 = pale, 1 = red) Tj ET");
+  const content = commands.join("\n");
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageW} ${pageH}] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>`,
+    `<< /Length ${new TextEncoder().encode(content).length} >>\nstream\n${content}\nendstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+  ];
+  let pdf = "%PDF-1.4\n", offsets = [0];
+  objects.forEach((obj, i) => { offsets.push(new TextEncoder().encode(pdf).length); pdf += `${i+1} 0 obj\n${obj}\nendobj\n`; });
+  const xref = new TextEncoder().encode(pdf).length;
+  pdf += `xref\n0 ${objects.length+1}\n0000000000 65535 f \n${offsets.slice(1).map(x => String(x).padStart(10,"0")+" 00000 n ").join("\n")}\ntrailer\n<< /Size ${objects.length+1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  downloadBlob(new Blob([pdf], {type:"application/pdf"}), "CallVCF_LD_heatmap.pdf");
+}
+
 function renderLeadResult(data) {
   const lead = data.lead_record || {};
   const ld = data.ld;
@@ -279,11 +400,13 @@ function renderLeadResult(data) {
   </div>`;
 
   if (ld) {
-    const linkedRows = (ld.linked_variants || []).map(x => ({位点: `${x.chrom}:${x.pos}`, ID: x.id || ".", REF: x.ref, ALT: x.alt, 类型: x.variant_type, "r²": x.r2, 有效样本: x.n, 距Lead_bp: x.distance}));
-    html += `<section class="analysis-section"><h4>LD 区段与连锁变异集</h4><p class="sub">搜索 ${ld.search_region.chrom}:${formatNumber(ld.search_region.start)}–${formatNumber(ld.search_region.end)}；检测 ${formatNumber(ld.tested_variant_count)} 个二等位变异。绿色为达到阈值的变异，红色为 Lead。</p>
-      ${renderLdChart(ld)}
+    const linkedRows = (ld.linked_variants || []).map(x => ({位点: `${x.chrom}:${x.pos}`, ID: x.id || ".", REF: x.ref, ALT: x.alt, 类型: x.variant_type, "最大r²": x.max_r2 ?? x.r2, 连锁Lead数: x.lead_count ?? 1, 连锁Lead: (x.linked_leads || [data.lead_locus]).join(", "), 有效样本: x.n, 距Lead_bp: x.distance ?? "—"}));
+    const leadRows = (ld.lead_results || []).map(x => ({Lead: x.lead_record.key, 连锁变异数: x.linked_variant_count, 区段起点: x.block.start, 区段终点: x.block.end, 跨度_bp: x.block.span_bp}));
+    html += `<section class="analysis-section"><h4>${data.ld_mode === "multi_lead_region" ? "区间内多 Lead 连锁 SNP 联集" : "指定 Lead 的连锁 SNP"}</h4><p class="sub">搜索 ${ld.search_region.chrom}:${formatNumber(ld.search_region.start)}–${formatNumber(ld.search_region.end)}；检测 ${formatNumber(ld.tested_variant_count)} 个有效二等位变异，r² ≥ ${ld.threshold}。</p>
+      ${renderRegionalLdFigure(data)}
+      ${leadRows.length ? `<h4 class="subheading">各 Lead 连锁跨度</h4>${genericTable(leadRows, ["Lead", "连锁变异数", "区段起点", "区段终点", "跨度_bp"])}` : ""}
       <div class="pane-intro" style="margin:12px 0 8px"><p>连锁跨度 ${formatNumber(ld.linkage_region.span_bp)} bp；r² ≥ ${ld.threshold}。</p><div><button class="secondary" id="copyLinkedBtn">复制位点</button> <button class="secondary" id="downloadLinkedBtn">下载 TSV</button></div></div>
-      ${genericTable(linkedRows, ["位点", "ID", "REF", "ALT", "类型", "r²", "有效样本", "距Lead_bp"])}</section>`;
+      ${genericTable(linkedRows, ["位点", "ID", "REF", "ALT", "类型", "最大r²", "连锁Lead数", "连锁Lead", "有效样本", "距Lead_bp"])}</section>`;
   }
 
   if (data.gene) {
@@ -312,7 +435,7 @@ function renderLeadResult(data) {
 }
 
 function saveAdvancedSettings() {
-  const ids = ["gffPath", "annotationPath", "domainPath", "phenotypePath", "ldblockshowPath", "outputDir", "ldWindow", "ldThreshold", "ldMinSamples"];
+  const ids = ["gffPath", "annotationPath", "domainPath", "phenotypePath", "ldblockshowPath", "outputDir", "ldWindow", "ldThreshold", "ldMinSamples", "ldMode", "ldRegion", "leadLoci", "heatmapMaxVariants", "profilePhenotypePath", "profilePThreshold", "traitDirections"];
   localStorage.setItem("vcfExplorerAdvanced", JSON.stringify(Object.fromEntries(ids.map(id => [id, $(id).value]))));
 }
 
@@ -335,12 +458,16 @@ async function browseResource(button) {
 async function runLeadAnalysis() {
   const button = $("leadRunBtn"), target = $("leadResult");
   try {
-    const leadLocus = $("leadLocus").value.trim() || lociText(false).split(/[\s,;]+/).find(Boolean);
+    const mode = $("ldMode").value;
+    const leadText = mode === "multi_lead_region" ? $("leadLoci").value.trim() : $("leadLocus").value.trim();
+    const leadLocus = leadText.split(/[\s,;]+/).find(Boolean) || lociText(false).split(/[\s,;]+/).find(Boolean);
     if (!leadLocus) throw new Error("请输入一个 Lead 位点");
     const options = { ld: $("optLd").checked, gene: $("optGene").checked, function: $("optFunction").checked,
       domain: $("optDomain").checked, phenotype: $("optPhenotype").checked, ldblockshow: $("optLdblockshow").checked };
     if (!Object.values(options).some(Boolean)) throw new Error("请至少勾选一项分析功能");
-    const payload = { path: currentPath(), lead_locus: leadLocus, window_kb: $("ldWindow").value,
+    if (mode === "multi_lead_region" && !$("ldRegion").value.trim()) throw new Error("多 Lead 模式请输入指定区间");
+    const payload = { path: currentPath(), lead_locus: leadLocus, lead_loci: leadText || leadLocus, ld_mode: mode,
+      region: $("ldRegion").value.trim(), heatmap_max_variants: $("heatmapMaxVariants").value, window_kb: $("ldWindow").value,
       r2_threshold: $("ldThreshold").value, min_samples: $("ldMinSamples").value, options,
       gff_path: $("gffPath").value.trim(), annotation_path: $("annotationPath").value.trim(),
       domain_path: $("domainPath").value.trim(), phenotype_path: $("phenotypePath").value.trim(),
@@ -379,6 +506,45 @@ function downloadLinked() {
   link.download = `linked_variants_${(state.lastLeadResult?.lead_locus || "lead").replace(":", "_")}.tsv`;
   link.click();
   setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+function renderTrendChart(data) {
+  const rows = (data.rows || []).filter(x => x.advantage_contribution != null);
+  if (!rows.length) return '<div class="empty-state">没有可计算趋势的记录；请检查 β、效应等位基因和表型有利方向。</div>';
+  const shown = [...rows].sort((a,b) => Math.abs(b.advantage_contribution) - Math.abs(a.advantage_contribution)).slice(0, 60);
+  const width = 960, rowH = 24, top = 26, left = 210, right = 55, height = top + shown.length * rowH + 30;
+  const maxAbs = Math.max(.001, ...shown.map(x => Math.abs(x.advantage_contribution))), half = (width-left-right)/2, zero = left+half;
+  const marks = shown.map((x, i) => {
+    const y = top+i*rowH, value = x.advantage_contribution, w = Math.abs(value)/maxAbs*half;
+    const rx = value >= 0 ? zero : zero-w;
+    return `<text x="${left-8}" y="${y+14}" text-anchor="end" fill="#344b43">${escapeHtml(x.sample)} · ${escapeHtml(x.trait)} · ${escapeHtml(x.lead)}</text><rect x="${rx}" y="${y+3}" width="${w}" height="14" fill="${value >= 0 ? "#23836c" : "#c94955"}"><title>贡献=${value}；P=${x.pvalue}；GT=${escapeHtml(x.gt)}</title></rect>`;
+  }).join("");
+  return `<div class="trend-chart"><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Lead-SNP 表型趋势贡献图"><line x1="${zero}" x2="${zero}" y1="8" y2="${height-20}" stroke="#71827a"/><text x="${zero-half/2}" y="16" text-anchor="middle" fill="#9a3440">不利方向</text><text x="${zero+half/2}" y="16" text-anchor="middle" fill="#176b59">有利方向</text>${marks}</svg></div>`;
+}
+
+function renderSampleLeadProfile(data) {
+  const cards = (data.summaries || []).map(x => `<div class="meta-card"><span>${escapeHtml(x.sample)} · 综合趋势指数</span><strong class="${x.trend_index == null ? "" : x.trend_index >= 0 ? "status-good" : "status-bad"}">${x.trend_index == null ? "未计算" : x.trend_index}</strong><small>${x.distinct_leads} 个 Lead · ${x.significant_records} 条显著 · 相对有利 ${x.favorable_records} / 不利 ${x.unfavorable_records} / 中性 ${x.neutral_records || 0}</small></div>`).join("");
+  const rows = (data.rows || []).map(x => ({样本:x.sample, Lead:x.lead, 表型:x.trait, GT:x.gt, ALT剂量:x.dosage_alt, 效应等位基因:x.effect_allele || "—", 效应剂量:x.effect_copies ?? "—", 群体均值:x.cohort_mean_effect_copies ?? "—", beta:x.beta ?? "—", P值:x.pvalue, "-log10(P)":x.neg_log10_p, 显著:x.significant ? "是" : "否", 表型方向:x.trait_direction || "未指定", 等位基因效应:x.effect_direction === "favorable" ? "有利" : x.effect_direction === "unfavorable" ? "不利" : "未知", 样本相对趋势:x.trend === "favorable" ? "有利" : x.trend === "unfavorable" ? "不利" : x.trend === "neutral" ? "中性" : "方向未知", 趋势贡献:x.advantage_contribution ?? "—"}));
+  const missing = data.missing_leads?.length ? `<div class="missing-box">VCF 中未找到：${data.missing_leads.map(escapeHtml).join("、")}</div>` : "";
+  return `${missing}<div class="lead-summary">${cards}</div><p class="sub">${escapeHtml(data.method_note)}</p>${renderTrendChart(data)}<div class="pane-intro" style="margin:12px 0 8px"><p>匹配 ${data.association_record_count} 条 Lead×表型关联记录。</p><button class="secondary" id="downloadProfileBtn">下载明细 TSV</button></div>${genericTable(rows, ["样本","Lead","表型","GT","ALT剂量","效应等位基因","效应剂量","群体均值","beta","P值","-log10(P)","显著","表型方向","等位基因效应","样本相对趋势","趋势贡献"])}`;
+}
+
+async function runSampleLeadProfile() {
+  const button = $("sampleLeadRunBtn"), target = $("sampleLeadResult");
+  try {
+    const payload = {path: currentPath(), samples: selectedSamples(true), lead_loci: $("profileLeadLoci").value.trim(), phenotype_path: $("profilePhenotypePath").value.trim(), significance_threshold: $("profilePThreshold").value, trait_directions: $("traitDirections").value};
+    if (!payload.lead_loci) throw new Error("请输入 Lead-SNP 列表");
+    setLoading(target, button, "正在联合 VCF 与 GWAS 结果生成样本画像…");
+    const result = await api("/api/sample-lead-profile", payload); state.lastProfileResult = result; saveAdvancedSettings();
+    clearLoading(target, button); target.innerHTML = renderSampleLeadProfile(result); toast("样本 Lead-SNP 画像已生成");
+  } catch (error) { clearLoading(target, button); target.className = "result-body empty-state"; target.textContent = error.message; toast(error.message, true); }
+}
+
+function downloadProfile() {
+  const rows = state.lastProfileResult?.rows || [];
+  const fields = ["sample","lead","trait","gt","dosage_alt","effect_allele","effect_copies","cohort_mean_effect_copies","beta","pvalue","neg_log10_p","significant","trait_direction","effect_direction","trend","advantage_contribution"];
+  const text = [fields.join("\t"), ...rows.map(row => fields.map(k => row[k] ?? "").join("\t"))].join("\n");
+  downloadBlob(new Blob([text], {type:"text/tab-separated-values;charset=utf-8"}), "CallVCF_sample_lead_profile.tsv");
 }
 
 async function runAction(action, button) {
@@ -421,11 +587,21 @@ function initEvents() {
   $("samplesInput").addEventListener("input", () => renderSampleSuggestions($("sampleSearch").value));
   $("sampleSuggestions").addEventListener("click", e => { const btn = e.target.closest("[data-sample]"); if (btn) toggleSample(btn.dataset.sample); });
   $("leadRunBtn").addEventListener("click", runLeadAnalysis);
+  $("sampleLeadRunBtn").addEventListener("click", runSampleLeadProfile);
+  $("ldMode").addEventListener("change", () => {
+    const multi = $("ldMode").value === "multi_lead_region";
+    document.querySelectorAll(".multi-lead-field").forEach(x => x.classList.toggle("hidden", !multi));
+    $("leadLocus").closest("label").classList.toggle("hidden", multi);
+    $("ldWindow").closest("label").classList.toggle("hidden", multi);
+  });
   document.querySelectorAll(".browse-resource").forEach(btn => btn.addEventListener("click", () => browseResource(btn)));
   $("leadResult").addEventListener("click", e => {
     if (e.target.closest("#copyLinkedBtn")) copyLinked().catch(err => toast(err.message, true));
     if (e.target.closest("#downloadLinkedBtn")) downloadLinked();
+    if (e.target.closest("#exportLdPngBtn")) { try { exportLdPng(); } catch (err) { toast(err.message, true); } }
+    if (e.target.closest("#exportLdPdfBtn")) { try { exportLdPdf(); } catch (err) { toast(err.message, true); } }
   });
+  $("sampleLeadResult").addEventListener("click", e => { if (e.target.closest("#downloadProfileBtn")) downloadProfile(); });
   document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x === tab));
     document.querySelectorAll(".tab-pane").forEach(x => x.classList.toggle("active", x.id === `pane-${tab.dataset.tab}`));
@@ -439,5 +615,6 @@ document.addEventListener("DOMContentLoaded", () => {
   if (saved) $("vcfPath").value = saved;
   initEvents();
   restoreAdvancedSettings();
+  $("ldMode").dispatchEvent(new Event("change"));
   checkHealth();
 });

@@ -38,6 +38,82 @@ def pairwise_r2(left, right, min_samples=20):
     return max(0.0, min(1.0, (cov * cov) / (var_a * var_b))), n
 
 
+def parse_region(raw):
+    match = re.match(r"^\s*([^:\s]+)\s*[:\s]\s*([0-9,]+)\s*[-:]\s*([0-9,]+)\s*$", str(raw or ""))
+    if not match:
+        raise VCFError("区间格式应为 chr:start-end，例如 5:2400000-2650000")
+    chrom = match.group(1)
+    start, end = int(match.group(2).replace(",", "")), int(match.group(3).replace(",", ""))
+    if start < 1 or end < start:
+        raise VCFError("查询区间的起止位置无效")
+    return chrom, start, end
+
+
+def parse_trait_directions(raw):
+    directions = {}
+    for line in re.split(r"[\r\n;]+", str(raw or "")):
+        line = line.strip()
+        if not line:
+            continue
+        parts = re.split(r"\s*[=:,\t]\s*", line, maxsplit=1)
+        if len(parts) != 2:
+            raise VCFError("表型方向应逐行填写：表型名=HIGH 或 表型名=LOW")
+        trait, value = parts[0].strip(), parts[1].strip().lower()
+        if value in {"high", "higher", "up", "1", "高", "越高越好"}:
+            directions[trait] = 1
+        elif value in {"low", "lower", "down", "-1", "低", "越低越好"}:
+            directions[trait] = -1
+        else:
+            raise VCFError("无法识别表型 {} 的方向：{}".format(trait, parts[1]))
+    return directions
+
+
+def _record_summary(record):
+    return {k: record.get(k) for k in (
+        "key", "chrom", "pos", "end", "id", "ref", "alt", "variant_type", "svtype", "svlen"
+    )}
+
+
+def _usable_variants(records, samples, min_samples):
+    usable = []
+    for record in records:
+        if "," in record["alt"]:
+            continue
+        dosages = [genotype_dosage(record["genotypes"].get(sample)) for sample in samples]
+        if sum(x is not None for x in dosages) >= min_samples:
+            usable.append((record, dosages))
+    return usable
+
+
+def build_ld_heatmap(usable, wanted_keys, min_samples, max_variants=120, priority=None):
+    wanted = set(wanted_keys)
+    selected = [(record, dosage) for record, dosage in usable if record["key"] in wanted]
+    original_count = len(selected)
+    priority = priority or {}
+    if len(selected) > max_variants:
+        selected = sorted(
+            selected,
+            key=lambda item: (-float(priority.get(item[0]["key"], 0)), item[0]["pos"])
+        )[:max_variants]
+    selected.sort(key=lambda item: item[0]["pos"])
+    variants = [_record_summary(record) for record, _ in selected]
+    matrix = []
+    for i, (_, left) in enumerate(selected):
+        row = []
+        for j, (_, right) in enumerate(selected):
+            if i == j:
+                value = 1.0
+            else:
+                value, _ = pairwise_r2(left, right, min_samples)
+            row.append(None if value is None else round(value, 6))
+        matrix.append(row)
+    return {
+        "variants": variants, "matrix": matrix, "original_count": original_count,
+        "plotted_count": len(variants), "downsampled": original_count > len(variants),
+        "max_variants": max_variants,
+    }
+
+
 def _open_text(path):
     with Path(path).open("rb") as handle:
         compressed = handle.read(2) == b"\x1f\x8b"
@@ -244,6 +320,13 @@ def _ps_record(parts, header):
     pos_i = next((i for i, x in enumerate(norm) if x in {"pos", "position", "bp"}), None)
     p_i = next((i for i, x in enumerate(norm) if x in {"p", "pvalue", "pval", "pvaluewald"}), None)
     marker_i = next((i for i, x in enumerate(norm) if x in {"snp", "marker", "markerid", "id", "rs"}), None)
+    beta_i = next((i for i, x in enumerate(norm) if x in {"beta", "effect", "estimate", "effectsize"}), None)
+    effect_i = next((i for i, x in enumerate(norm) if x in {
+        "effectallele", "effectallele1", "ea", "a1", "allele1"
+    }), None)
+    other_i = next((i for i, x in enumerate(norm) if x in {
+        "otherallele", "noneffectallele", "nea", "a2", "allele0", "allele2"
+    }), None)
     chrom = pos = marker = None
     if chr_i is not None and pos_i is not None and max(chr_i, pos_i) < len(parts):
         chrom, pos = parts[chr_i], parts[pos_i]
@@ -277,7 +360,18 @@ def _ps_record(parts, header):
                 break
     if pvalue is None:
         return None
-    return {"chrom": str(chrom), "pos": pos, "marker": marker, "pvalue": pvalue}
+    beta = None
+    if beta_i is not None and beta_i < len(parts):
+        try:
+            beta = float(parts[beta_i])
+        except ValueError:
+            pass
+    return {
+        "chrom": str(chrom), "pos": pos, "marker": marker, "pvalue": pvalue,
+        "beta": beta,
+        "effect_allele": parts[effect_i] if effect_i is not None and effect_i < len(parts) else None,
+        "other_allele": parts[other_i] if other_i is not None and other_i < len(parts) else None,
+    }
 
 
 def phenotype_region(path_text, chrom, start, end, max_files=100, max_records=10000):
@@ -329,16 +423,10 @@ class AdvancedAnalyzer:
     def __init__(self, service):
         self.service = service
 
-    def calculate_ld(self, path, chrom, lead_pos, window_bp, threshold, min_samples):
+    def calculate_ld(self, path, chrom, lead_pos, window_bp, threshold, min_samples, max_heatmap=120):
         start, end = max(1, lead_pos - window_bp), lead_pos + window_bp
         metadata, samples, records = self.service.query_region(path, chrom, start, end)
-        usable = []
-        for record in records:
-            if "," in record["alt"]:
-                continue
-            dosages = [genotype_dosage(record["genotypes"].get(sample)) for sample in samples]
-            if sum(x is not None for x in dosages) >= min_samples:
-                usable.append((record, dosages))
+        usable = _usable_variants(records, samples, min_samples)
         lead_candidates = [(r, d) for r, d in usable if r["pos"] == lead_pos]
         if not lead_candidates:
             raise VCFError("Lead 位点不存在，或没有足够的二等位基因型用于 LD 计算")
@@ -373,6 +461,183 @@ class AdvancedAnalyzer:
             "linked_variant_count": len(linked),
             "linked_snp_count": sum(x["variant_type"] == "SNP" for x in linked),
             "linked_variants": linked, "points": points,
+            "heatmap": build_ld_heatmap(
+                usable, [x["key"] for x in linked], min_samples, max_heatmap,
+                priority={x["key"]: x["r2"] for x in linked}
+            ),
+        }
+
+    def calculate_multi_lead_ld(self, path, raw_region, raw_leads, threshold, min_samples, max_heatmap):
+        chrom, start, end = parse_region(raw_region)
+        loci = parse_loci(raw_leads, limit=100)
+        if not loci:
+            raise VCFError("多 Lead 模式请至少输入一个 Lead-SNP")
+        wrong = ["{}:{}".format(c, p) for c, p in loci if c != chrom or not start <= p <= end]
+        if wrong:
+            raise VCFError("这些 Lead 不在指定区间内：{}".format(", ".join(wrong[:10])))
+        _, samples, records = self.service.query_region(path, chrom, start, end)
+        usable = _usable_variants(records, samples, min_samples)
+        by_site = {}
+        for record, dosage in usable:
+            by_site.setdefault((record["chrom"], record["pos"]), (record, dosage))
+        missing = ["{}:{}".format(c, p) for c, p in loci if (c, p) not in by_site]
+        if missing:
+            raise VCFError("Lead 不存在，或有效二等位基因型不足：{}".format(", ".join(missing[:10])))
+
+        union = {}
+        lead_results = []
+        for lead_chrom, lead_pos in loci:
+            lead_record, lead_dosage = by_site[(lead_chrom, lead_pos)]
+            linked = []
+            for record, dosage in usable:
+                if record is lead_record:
+                    r2, n = 1.0, sum(x is not None for x in dosage)
+                else:
+                    r2, n = pairwise_r2(lead_dosage, dosage, min_samples)
+                if r2 is None or r2 < threshold:
+                    continue
+                item = {
+                    **_record_summary(record), "r2": round(r2, 6), "n": n,
+                    "distance": record["pos"] - lead_pos,
+                }
+                linked.append(item)
+                merged = union.setdefault(record["key"], {
+                    **_record_summary(record), "r2": round(r2, 6), "max_r2": round(r2, 6),
+                    "n": n, "linked_leads": [], "lead_count": 0,
+                })
+                merged["max_r2"] = max(merged["max_r2"], round(r2, 6))
+                merged["r2"] = merged["max_r2"]
+                merged["linked_leads"].append("{}:{}".format(lead_chrom, lead_pos))
+                merged["lead_count"] = len(merged["linked_leads"])
+            positions = [x["pos"] for x in linked] or [lead_pos]
+            lead_results.append({
+                "lead_record": _record_summary(lead_record),
+                "linked_variant_count": len(linked),
+                "block": {"chrom": chrom, "start": min(positions), "end": max(positions),
+                          "span_bp": max(positions) - min(positions) + 1},
+            })
+        linked = sorted(union.values(), key=lambda x: (x["pos"], x["key"]))
+        heatmap = build_ld_heatmap(
+            usable, [x["key"] for x in linked], min_samples, max_heatmap,
+            priority={x["key"]: x["max_r2"] + min(x["lead_count"], 20) for x in linked},
+        )
+        primary = lead_results[0]["lead_record"]
+        return {
+            "mode": "multi_lead_region", "lead_record": primary,
+            "lead_results": lead_results,
+            "search_region": {"chrom": chrom, "start": start, "end": end, "window_bp": None},
+            "linkage_region": {"chrom": chrom, "start": start, "end": end, "span_bp": end - start + 1},
+            "threshold": threshold, "min_samples": min_samples, "sample_count": len(samples),
+            "tested_variant_count": len(usable), "linked_variant_count": len(linked),
+            "linked_snp_count": sum(x["variant_type"] == "SNP" for x in linked),
+            "linked_variants": linked, "points": linked, "heatmap": heatmap,
+        }
+
+    def sample_lead_profile(self, payload):
+        path = payload.get("path")
+        metadata = self.service.inspect(path)
+        samples = self.service._validate_samples(metadata, payload.get("samples") or [])
+        if not samples:
+            raise VCFError("请至少选择一个样本")
+        if len(samples) > 20:
+            raise VCFError("一次最多分析 20 个样本")
+        loci = parse_loci(payload.get("lead_loci"), limit=500)
+        if not loci:
+            raise VCFError("请输入 Lead-SNP 位点列表")
+        phenotype_path = payload.get("phenotype_path")
+        if not phenotype_path:
+            raise VCFError("样本 Lead 画像需要表型/GWAS .ps 文件或目录")
+        directions = parse_trait_directions(payload.get("trait_directions"))
+        sig_threshold = float(payload.get("significance_threshold", 1e-5))
+        if not 0 < sig_threshold <= 1:
+            raise VCFError("显著性阈值必须在 0 到 1 之间")
+
+        _, _, cohort_samples, records = self.service.query_records(
+            path, "\n".join("{}:{}".format(chrom, pos) for chrom, pos in loci)
+        )
+        record_by_site = {}
+        for record in records:
+            record_by_site.setdefault((record["chrom"], record["pos"]), record)
+        missing = ["{}:{}".format(c, p) for c, p in loci if (c, p) not in record_by_site]
+        associations = []
+        for chrom in sorted({c for c, _ in loci}):
+            positions = [p for c, p in loci if c == chrom]
+            region_data = phenotype_region(phenotype_path, chrom, min(positions), max(positions), max_records=50000)
+            wanted = set(positions)
+            associations.extend(x for x in region_data.get("records", []) if x["pos"] in wanted)
+        assoc_by_site = {}
+        for association in associations:
+            assoc_by_site.setdefault((association["chrom"], association["pos"]), []).append(association)
+
+        rows = []
+        summaries = []
+        for sample in samples:
+            sample_rows = []
+            for chrom, pos in loci:
+                record = record_by_site.get((chrom, pos))
+                if not record:
+                    continue
+                gt = record["genotypes"].get(sample, ".")
+                dosage = genotype_dosage(gt)
+                cohort_dosages = [genotype_dosage(record["genotypes"].get(name)) for name in cohort_samples]
+                cohort_dosages = [x for x in cohort_dosages if x is not None]
+                for assoc in assoc_by_site.get((chrom, pos), []):
+                    effect_allele = str(assoc.get("effect_allele") or "")
+                    if effect_allele == record["alt"]:
+                        effect_copies = dosage
+                        cohort_effect = cohort_dosages
+                    elif effect_allele == record["ref"]:
+                        effect_copies = None if dosage is None else 2 - dosage
+                        cohort_effect = [2 - x for x in cohort_dosages]
+                    else:
+                        effect_copies, cohort_effect = None, []
+                    cohort_mean = sum(cohort_effect) / len(cohort_effect) if cohort_effect else None
+                    beta, pvalue = assoc.get("beta"), assoc["pvalue"]
+                    direction = directions.get(assoc["trait"])
+                    favorable_sign = None if beta is None or direction is None else (1 if beta * direction > 0 else -1)
+                    weight = min(50.0, -math.log10(max(pvalue, 1e-300)))
+                    contribution = None
+                    if effect_copies is not None and cohort_mean is not None and favorable_sign is not None:
+                        contribution = ((effect_copies - cohort_mean) / 2.0) * favorable_sign * weight
+                    sample_trend = "direction_unknown"
+                    if contribution is not None:
+                        sample_trend = ("favorable" if contribution > 1e-12 else
+                                        "unfavorable" if contribution < -1e-12 else "neutral")
+                    row = {
+                        "sample": sample, "lead": "{}:{}".format(chrom, pos),
+                        "record": _record_summary(record), "gt": gt, "dosage_alt": dosage,
+                        "trait": assoc["trait"], "pvalue": pvalue, "neg_log10_p": round(weight, 6),
+                        "beta": beta, "effect_allele": assoc.get("effect_allele"),
+                        "effect_copies": effect_copies,
+                        "cohort_mean_effect_copies": None if cohort_mean is None else round(cohort_mean, 6),
+                        "significant": pvalue <= sig_threshold,
+                        "trait_direction": "HIGH" if direction == 1 else "LOW" if direction == -1 else None,
+                        "effect_direction": ("favorable" if favorable_sign == 1 else
+                                             "unfavorable" if favorable_sign == -1 else "direction_unknown"),
+                        "trend": sample_trend,
+                        "advantage_contribution": None if contribution is None else round(contribution, 6),
+                    }
+                    sample_rows.append(row)
+                    rows.append(row)
+            evaluable = [x for x in sample_rows if x["advantage_contribution"] is not None]
+            denominator = sum(x["neg_log10_p"] for x in evaluable)
+            score = None if not denominator else max(-100.0, min(100.0,
+                100.0 * sum(x["advantage_contribution"] for x in evaluable) / denominator))
+            summaries.append({
+                "sample": sample, "lead_trait_records": len(sample_rows),
+                "distinct_leads": len({x["lead"] for x in sample_rows}),
+                "significant_records": sum(x["significant"] for x in sample_rows),
+                "favorable_records": sum(x["trend"] == "favorable" for x in sample_rows),
+                "unfavorable_records": sum(x["trend"] == "unfavorable" for x in sample_rows),
+                "neutral_records": sum(x["trend"] == "neutral" for x in sample_rows),
+                "evaluable_records": len(evaluable),
+                "trend_index": None if score is None else round(score, 4),
+            })
+        return {
+            "samples": samples, "lead_count": len(loci), "missing_leads": missing,
+            "association_record_count": len(associations), "significance_threshold": sig_threshold,
+            "directions": directions, "summaries": summaries, "rows": rows,
+            "method_note": "趋势指数按效应等位基因剂量相对群体均值、效应方向与 -log10(P) 加权，范围 -100 到 100；仅对已给定有利方向且具备 beta/效应等位基因的记录计算。",
         }
 
     def run_ldblockshow(self, payload, ld_result, phenotype):
@@ -439,9 +704,14 @@ class AdvancedAnalyzer:
 
     def analyze(self, payload):
         path = payload.get("path")
-        loci = parse_loci(payload.get("lead_locus"), limit=1)
-        if len(loci) != 1:
-            raise VCFError("Lead 分析一次只接受一个位点")
+        mode = str(payload.get("ld_mode") or "single_lead")
+        loci = parse_loci(payload.get("lead_loci") or payload.get("lead_locus"), limit=100)
+        if not loci:
+            raise VCFError("请输入至少一个 Lead 位点")
+        if mode == "single_lead" and len(loci) != 1:
+            raise VCFError("指定 Lead 模式一次只接受一个位点")
+        if mode not in {"single_lead", "multi_lead_region"}:
+            raise VCFError("无法识别的 LD 展示模式")
         chrom, lead_pos = loci[0]
         window_bp = int(float(payload.get("window_kb", 500)) * 1000)
         if not 1000 <= window_bp <= 50_000_000:
@@ -452,9 +722,12 @@ class AdvancedAnalyzer:
         min_samples = int(payload.get("min_samples", 20))
         if min_samples < 3:
             raise VCFError("LD 最少有效样本数不能低于 3")
+        max_heatmap = int(payload.get("heatmap_max_variants", 120))
+        if not 10 <= max_heatmap <= 250:
+            raise VCFError("热图 SNP 数必须在 10 到 250 之间")
         options = payload.get("options") or {}
         need_ld = bool(options.get("ld") or options.get("phenotype") or options.get("ldblockshow"))
-        result = {"lead_locus": "{}:{}".format(chrom, lead_pos), "options": options}
+        result = {"lead_locus": "{}:{}".format(chrom, lead_pos), "options": options, "ld_mode": mode}
 
         _, _, _, lead_records = self.service.query_records(path, "{}:{}".format(chrom, lead_pos))
         if not lead_records:
@@ -466,7 +739,12 @@ class AdvancedAnalyzer:
 
         ld_result = None
         if need_ld:
-            ld_result = self.calculate_ld(path, chrom, lead_pos, window_bp, threshold, min_samples)
+            if mode == "multi_lead_region":
+                ld_result = self.calculate_multi_lead_ld(
+                    path, payload.get("region"), payload.get("lead_loci"), threshold, min_samples, max_heatmap
+                )
+            else:
+                ld_result = self.calculate_ld(path, chrom, lead_pos, window_bp, threshold, min_samples, max_heatmap)
             result["ld"] = ld_result
         region = ld_result["linkage_region"] if ld_result else {"chrom": chrom, "start": lead_pos, "end": lead_pos}
 
