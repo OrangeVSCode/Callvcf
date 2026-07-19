@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="本地 VCF 位点、基因型与样本交互查询工具">
+  <title>VCF Explorer · 位点与样本查询</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">LOCAL GENOMICS UTILITY</p>
+      <h1>VCF Explorer</h1>
+      <p class="lede">识别 SNP、INDEL 与 SV，按位点或样本快速查看基因型分布。</p>
+    </div>
+    <div class="top-actions">
+      <div class="status-pill" id="serverStatus"><span></span>正在连接</div>
+      <button class="quiet-button" id="shutdownBtn" title="关闭本地 CallVCF">关闭工具</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel source-panel">
+      <div class="section-heading">
+        <div><span class="step">01</span><h2>选择 VCF</h2></div>
+        <p>通过系统文件选择框载入本机 VCF/VCF.GZ，或直接粘贴文件路径。</p>
+      </div>
+      <div class="source-grid">
+        <label class="field span-2">
+          <span>本地 VCF / BCF 文件</span>
+          <div class="input-row">
+            <input id="vcfPath" type="text" spellcheck="false" value="" placeholder="D:\data\example.vcf.gz">
+            <button class="secondary" id="selectFileBtn">选择文件…</button>
+            <button class="primary" id="inspectBtn">载入并识别</button>
+          </div>
+        </label>
+        <label class="field">
+          <span>扫描本地目录（可选）</span>
+          <input id="discoverRoot" type="text" spellcheck="false" value="" placeholder="D:\data">
+        </label>
+        <div class="field action-field">
+          <span>目录内文件</span>
+          <button class="secondary" id="discoverBtn">扫描 VCF 文件</button>
+        </div>
+        <label class="field span-2 hidden" id="fileSelectWrap">
+          <span>扫描结果</span>
+          <select id="fileSelect"></select>
+        </label>
+      </div>
+      <div id="metadata" class="metadata empty-state">尚未载入 VCF。</div>
+    </section>
+
+    <section class="panel query-panel">
+      <div class="section-heading">
+        <div><span class="step">02</span><h2>输入查询条件</h2></div>
+        <p>位点支持 <code>chr:pos</code> 或 <code>chr pos</code>，可换行、逗号或分号分隔。</p>
+      </div>
+      <div class="query-inputs">
+        <label class="field">
+          <span>位点列表</span>
+          <textarea id="lociInput" rows="7" spellcheck="false" placeholder="5:2538289&#10;5:2539274&#10;3:1393130"></textarea>
+          <small>一次最多 500 个位点；同一位置的多个变异记录会分别显示。</small>
+        </label>
+        <label class="field">
+          <span>样本列表</span>
+          <textarea id="samplesInput" rows="7" spellcheck="false" placeholder="GH3001&#10;GH3002"></textarea>
+          <small>可换行、逗号或空格分隔。载入 VCF 后可从下方快速添加。</small>
+        </label>
+      </div>
+      <div id="samplePicker" class="sample-picker hidden">
+        <div class="sample-picker-head">
+          <input id="sampleSearch" type="search" placeholder="搜索样本名称">
+          <span id="sampleSearchCount"></span>
+        </div>
+        <div id="sampleSuggestions" class="sample-suggestions"></div>
+      </div>
+    </section>
+
+    <section class="panel results-panel">
+      <div class="section-heading compact">
+        <div><span class="step">03</span><h2>选择分析</h2></div>
+      </div>
+      <div class="tabs" role="tablist" aria-label="分析类型">
+        <button class="tab active" data-tab="existence" role="tab">位点是否存在</button>
+        <button class="tab" data-tab="distribution" role="tab">位点基因型分布</button>
+        <button class="tab" data-tab="matrix" role="tab">样本 × 位点</button>
+        <button class="tab" data-tab="stats" role="tab">样本全局统计</button>
+        <button class="tab" data-tab="lead" role="tab">Lead 位点高级分析</button>
+      </div>
+
+      <div class="tab-pane active" id="pane-existence">
+        <div class="pane-intro"><div><h3>批量检查位点</h3><p>确认输入位置是否存在，并列出 REF、ALT、类型与记录 ID。</p></div><button class="primary run-btn" data-action="check">开始检查</button></div>
+        <div id="existenceResult" class="result-body empty-state">等待查询。</div>
+      </div>
+
+      <div class="tab-pane" id="pane-distribution">
+        <div class="pane-intro"><div><h3>三种常规基因型分布</h3><p>统计 0/0、0/1、1/1，并保留缺失和多等位基因型；展开即可查看具体样本。</p></div><button class="primary run-btn" data-action="distribution">统计分布</button></div>
+        <div class="legend">
+          <span><i class="g-hom-ref"></i>0/0</span><span><i class="g-het"></i>0/1</span><span><i class="g-hom-alt"></i>1/1</span><span><i class="g-missing"></i>缺失</span><span><i class="g-other"></i>其他</span>
+        </div>
+        <div id="distributionResult" class="result-body empty-state">等待查询。</div>
+      </div>
+
+      <div class="tab-pane" id="pane-matrix">
+        <div class="pane-intro"><div><h3>指定样本在指定位点的基因型</h3><p>生成样本 × 变异记录矩阵，同时显示 GT、实际等位基因和类别。</p></div><button class="primary run-btn" data-action="matrix">生成矩阵</button></div>
+        <div id="matrixResult" class="result-body empty-state">等待查询。</div>
+      </div>
+
+      <div class="tab-pane" id="pane-stats">
+        <div class="pane-intro">
+          <div><h3>指定样本的基因型统计</h3><p>留空位点列表时扫描整个 VCF；填写位点时只统计所选位置。</p></div>
+          <button class="primary run-btn" data-action="stats">开始统计</button>
+        </div>
+        <div class="notice">全 VCF 统计会顺序读取全部记录，耗时取决于文件大小；一次最多选择 50 个样本。</div>
+        <div id="statsResult" class="result-body empty-state">等待查询。</div>
+      </div>
+
+      <div class="tab-pane" id="pane-lead">
+        <div class="pane-intro">
+          <div><h3>Lead 位点、连锁区段与功能注释</h3><p>按需勾选分析项。连锁区段定义为窗口内与 Lead 位点达到指定 r² 阈值的最左、最右变异跨度。</p></div>
+          <button class="primary" id="leadRunBtn">运行所选分析</button>
+        </div>
+        <div class="advanced-layout">
+          <div class="advanced-main">
+            <div class="advanced-grid">
+              <label class="field"><span>Lead 位点</span><input id="leadLocus" type="text" placeholder="5:2538289"></label>
+              <label class="field"><span>左右窗口（kb）</span><input id="ldWindow" type="number" min="1" max="50000" value="500"></label>
+              <label class="field"><span>连锁阈值 r²</span><input id="ldThreshold" type="number" min="0" max="1" step="0.05" value="0.6"></label>
+              <label class="field"><span>最少共同有效样本</span><input id="ldMinSamples" type="number" min="3" value="20"></label>
+            </div>
+            <div class="option-grid" aria-label="高级分析选项">
+              <label class="check-option"><input id="optLd" type="checkbox" checked><span><b>LD 区段与连锁变异集</b><small>计算 Lead 与窗口内二等位变异的 r²</small></span></label>
+              <label class="check-option"><input id="optGene" type="checkbox"><span><b>相对基因位置</b><small>基于 GFF3/GTF 判断 CDS、外显子、内含子或上下游</small></span></label>
+              <label class="check-option"><input id="optFunction" type="checkbox"><span><b>突变功能</b><small>读取 VCF 的 ANN/CSQ/BCSQ，并可匹配外部注释表</small></span></label>
+              <label class="check-option"><input id="optDomain" type="checkbox"><span><b>蛋白结构域</b><small>按基因/蛋白 ID 匹配本地结构域注释表</small></span></label>
+              <label class="check-option"><input id="optPhenotype" type="checkbox"><span><b>区域表型关联</b><small>解析一个或一批 EMMAX/GWAS .ps 文件</small></span></label>
+              <label class="check-option"><input id="optLdblockshow" type="checkbox"><span><b>调用 LDBlockShow</b><small>输出 LD block、区域关联图及软件原始结果</small></span></label>
+            </div>
+          </div>
+
+          <details class="resource-panel" open>
+            <summary>本地注释与软件资源</summary>
+            <div class="resource-grid">
+              <label class="field"><span>GFF3 / GTF</span><div class="resource-input"><input id="gffPath" type="text" placeholder="基因注释文件"><button class="secondary browse-resource" data-target="gffPath" data-kind="gff">选择…</button></div></label>
+              <label class="field"><span>功能注释 TSV / CSV（可选）</span><div class="resource-input"><input id="annotationPath" type="text" placeholder="至少含 chr、pos 列"><button class="secondary browse-resource" data-target="annotationPath" data-kind="annotation">选择…</button></div></label>
+              <label class="field"><span>蛋白结构域 TSV / CSV</span><div class="resource-input"><input id="domainPath" type="text" placeholder="首列或表头含 gene/protein ID"><button class="secondary browse-resource" data-target="domainPath" data-kind="domain">选择…</button></div></label>
+              <label class="field"><span>表型 .ps 文件或目录</span><div class="resource-input triple"><input id="phenotypePath" type="text" placeholder="单个 .ps 或包含多个 .ps 的目录"><button class="secondary browse-resource" data-target="phenotypePath" data-kind="phenotype">文件…</button><button class="secondary browse-resource" data-target="phenotypePath" data-kind="phenotype_dir">目录…</button></div></label>
+              <label class="field"><span>LDBlockShow 可执行文件</span><div class="resource-input"><input id="ldblockshowPath" type="text" placeholder="LDBlockShow 或 LDBlockShow.exe"><button class="secondary browse-resource" data-target="ldblockshowPath" data-kind="executable">选择…</button></div></label>
+              <label class="check-option compact-check"><input id="ldblockshowWsl" type="checkbox"><span><b>Windows 通过 WSL 调用</b><small>可执行文件可填写 Linux 内的命令或路径，如 /usr/local/bin/LDBlockShow</small></span></label>
+              <label class="field"><span>LDBlockShow 输出目录</span><div class="resource-input"><input id="outputDir" type="text" placeholder="留空则在 VCF 同目录创建 CallVCF_LDBlockShow"><button class="secondary browse-resource" data-target="outputDir" data-kind="output_dir">选择…</button></div></label>
+            </div>
+          </details>
+        </div>
+        <div class="notice">LD 区段是按“与 Lead 位点的成对 r² 阈值跨度”定义的工作区间，不等同于 Gabriel 或 solid-spine 算法的正式 haplotype block；勾选 LDBlockShow 后会同时生成软件 block 结果。</div>
+        <div id="leadResult" class="result-body empty-state">等待高级分析。</div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

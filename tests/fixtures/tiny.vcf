@@ -1,0 +1,10 @@
+##fileformat=VCFv4.2
+##contig=<ID=1,length=1000000>
+##INFO=<ID=END,Number=1,Type=Integer,Description="End position">
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="SV type">
+##INFO=<ID=ANN,Number=.,Type=String,Description="Functional annotations">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	S1	S2	S3	S4
+1	100	rs1	A	G	.	PASS	ANN=G|missense_variant|MODERATE|GeneA|geneA|transcript|txA|protein_coding|1/2|c.10A>G|p.Lys4Arg	GT	0/0	0/1	1/1	./.
+1	200	indel1	AT	A	.	PASS	.	GT	0/1	1/1	0/0	1/2
+1	300	sv1	N	<DEL>	.	PASS	SVTYPE=DEL;END=500	GT	0/0	0/1	1/1	0/0
