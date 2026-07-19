@@ -136,6 +136,7 @@
             </div>
             <div class="option-grid" aria-label="高级分析选项">
               <label class="check-option"><input id="optLd" type="checkbox" checked><span><b>LD 区段与连锁变异集</b><small>计算 Lead 与窗口内二等位变异的 r²</small></span></label>
+              <label class="check-option"><input id="optGeneTrack" type="checkbox" checked><span><b>基因结构轨道</b><small>在 R² 与 D′ 热图上方绘制 GFF3/GTF 中的基因、外显子、CDS 与方向</small></span></label>
               <label class="check-option"><input id="optGene" type="checkbox"><span><b>相对基因位置</b><small>基于 GFF3/GTF 判断 CDS、外显子、内含子或上下游</small></span></label>
               <label class="check-option"><input id="optFunction" type="checkbox"><span><b>突变功能</b><small>读取 VCF 的 ANN/CSQ/BCSQ，并可匹配外部注释表</small></span></label>
               <label class="check-option"><input id="optDomain" type="checkbox"><span><b>蛋白结构域</b><small>按基因/蛋白 ID 匹配本地结构域注释表</small></span></label>
@@ -146,13 +147,20 @@
 
           <details class="resource-panel" open>
             <summary>本地注释与软件资源</summary>
+            <div class="tool-manager" id="toolManager">
+              <div class="tool-card"><div><b>PLINK 1.9</b><small id="plinkStatus">正在检测…</small></div><button class="secondary install-tool" data-tool="plink">一键安装</button></div>
+              <div class="tool-card"><div><b>LDBlockShow</b><small id="ldblockshowStatus">正在检测…</small></div><button class="secondary install-tool" data-tool="ldblockshow">一键安装</button></div>
+              <p class="sub" id="toolRoot"></p>
+            </div>
             <div class="resource-grid">
               <label class="field"><span>GFF3 / GTF</span><div class="resource-input"><input id="gffPath" type="text" placeholder="基因注释文件"><button class="secondary browse-resource" data-target="gffPath" data-kind="gff">选择…</button></div></label>
               <label class="field"><span>功能注释 TSV / CSV（可选）</span><div class="resource-input"><input id="annotationPath" type="text" placeholder="至少含 chr、pos 列"><button class="secondary browse-resource" data-target="annotationPath" data-kind="annotation">选择…</button></div></label>
               <label class="field"><span>蛋白结构域 TSV / CSV</span><div class="resource-input"><input id="domainPath" type="text" placeholder="首列或表头含 gene/protein ID"><button class="secondary browse-resource" data-target="domainPath" data-kind="domain">选择…</button></div></label>
               <label class="field"><span>表型 .ps 文件或目录</span><div class="resource-input triple"><input id="phenotypePath" type="text" placeholder="单个 .ps 或包含多个 .ps 的目录"><button class="secondary browse-resource" data-target="phenotypePath" data-kind="phenotype">文件…</button><button class="secondary browse-resource" data-target="phenotypePath" data-kind="phenotype_dir">目录…</button></div></label>
-              <label class="field"><span>LDBlockShow 可执行文件</span><div class="resource-input"><input id="ldblockshowPath" type="text" placeholder="LDBlockShow 或 LDBlockShow.exe"><button class="secondary browse-resource" data-target="ldblockshowPath" data-kind="executable">选择…</button></div></label>
-              <label class="check-option compact-check"><input id="ldblockshowWsl" type="checkbox"><span><b>Windows 通过 WSL 调用</b><small>可执行文件可填写 Linux 内的命令或路径，如 /usr/local/bin/LDBlockShow</small></span></label>
+              <label class="field"><span>LDBlockShow 可执行文件</span><div class="resource-input"><input id="ldblockshowPath" type="text" placeholder="可留空，优先使用一键安装版本"><button class="secondary browse-resource" data-target="ldblockshowPath" data-kind="executable">选择…</button></div></label>
+              <label class="check-option compact-check"><input id="ldblockshowWsl" type="checkbox"><span><b>Windows 通过 WSL 调用</b><small>一键安装的 LDBlockShow 在 Windows 上通过 WSL 运行</small></span></label>
+              <label class="field"><span>LDBlockShow LD 图类型</span><select id="ldblockshowMetric"><option value="4">D′ 与 R²（推荐）</option><option value="1">仅 D′</option><option value="2">仅 R²</option><option value="3">R² 与 D′</option></select></label>
+              <label class="field"><span>Haplotype block 算法</span><select id="ldblockshowBlockType"><option value="1">PLINK Gabriel（推荐）</option><option value="2">Solid Spine</option><option value="3">自定义 R²/D′ 阈值</option><option value="5">不划分 block</option></select></label>
               <label class="field"><span>LDBlockShow 输出目录</span><div class="resource-input"><input id="outputDir" type="text" placeholder="留空则在 VCF 同目录创建 CallVCF_LDBlockShow"><button class="secondary browse-resource" data-target="outputDir" data-kind="output_dir">选择…</button></div></label>
             </div>
           </details>

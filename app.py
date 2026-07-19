@@ -12,6 +12,7 @@ from urllib.parse import unquote, urlparse
 
 from vcf_service import VCFError, create_service
 from advanced_analysis import AdvancedAnalyzer
+from tool_manager import install_tool, tools_status
 
 
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -116,6 +117,8 @@ class Handler(BaseHTTPRequestHandler):
                 "backend": getattr(SERVICE, "backend", "bcftools"),
                 "bcftools": SERVICE.bcftools,
             })
+        if parsed.path == "/api/tools/status":
+            return self._json(200, {"ok": True, "data": tools_status()})
         relative = "index.html" if parsed.path in {"", "/"} else unquote(parsed.path.lstrip("/"))
         candidate = (STATIC_DIR / relative).resolve()
         if STATIC_DIR not in candidate.parents and candidate != STATIC_DIR:
@@ -165,6 +168,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = ADVANCED.analyze(payload)
             elif route == "/api/sample-lead-profile":
                 result = ADVANCED.sample_lead_profile(payload)
+            elif route == "/api/tools/install":
+                result = install_tool(payload.get("tool"))
             else:
                 return self._json(404, {"ok": False, "error": "接口不存在"})
             return self._json(200, {"ok": True, "data": result})

@@ -6,7 +6,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vcf_service import classify_variant, genotype_alleles, normalize_genotype, parse_loci
 from vcf_service import PurePythonVCFService
-from advanced_analysis import AdvancedAnalyzer, genotype_dosage, pairwise_r2, parse_region, parse_trait_directions
+from advanced_analysis import AdvancedAnalyzer, genotype_dosage, pairwise_r2, pairwise_dprime, parse_region, parse_trait_directions
+from tool_manager import tools_status
 
 
 class CoreTests(unittest.TestCase):
@@ -29,6 +30,12 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(classify_variant("N", "N]3:100]", "BND"), "SV")
         self.assertEqual(classify_variant("A", "T", "SNP", "SVTYPE=DEL;SVLEN=120"), "SV")
 
+    def test_optional_tool_status(self):
+        status = tools_status()
+        self.assertIn("plink", status)
+        self.assertIn("ldblockshow", status)
+        self.assertIn("tool_root", status)
+
     def test_locus_parsing(self):
         self.assertEqual(parse_loci("5:10\n3 20, D07:30"), [("5", 10), ("3", 20), ("D07", 30)])
         self.assertEqual(parse_loci(["chr1:5", "chr1:5"]), [("chr1", 5)])
@@ -39,6 +46,9 @@ class CoreTests(unittest.TestCase):
         r2, n = pairwise_r2([0, 1, 2, None], [0, 1, 2, 0], min_samples=3)
         self.assertAlmostEqual(r2, 1.0)
         self.assertEqual(n, 3)
+        dprime, dprime_n = pairwise_dprime([0, 1, 2, 0], [0, 1, 2, 0], min_samples=3)
+        self.assertAlmostEqual(dprime, 1.0)
+        self.assertEqual(dprime_n, 4)
         self.assertEqual(parse_region("1:10-500"), ("1", 10, 500))
         self.assertEqual(parse_trait_directions("Yield=HIGH\nDisease=LOW"), {"Yield": 1, "Disease": -1})
 
@@ -48,7 +58,7 @@ class CoreTests(unittest.TestCase):
         result = analyzer.analyze({
             "path": str(fixtures / "tiny.vcf"), "lead_locus": "1:100",
             "window_kb": 1, "r2_threshold": 0.8, "min_samples": 3,
-            "options": {"ld": True, "gene": True, "function": True,
+            "options": {"ld": True, "gene_track": True, "gene": True, "function": True,
                         "domain": True, "phenotype": True, "ldblockshow": False},
             "gff_path": str(fixtures / "tiny.gff3"),
             "annotation_path": str(fixtures / "annotation.tsv"),
@@ -62,6 +72,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["domain"]["matches"][0]["domain"], "Kinase")
         self.assertEqual(result["phenotype"]["traits"][0]["min_p"], 0.000001)
         self.assertEqual(result["ld"]["heatmap"]["plotted_count"], 2)
+        self.assertEqual(result["ld"]["heatmap"]["matrix_dprime"][0][0], 1.0)
+        self.assertEqual(result["gene_track"]["models"][0]["name"], "GeneA")
 
     def test_multi_lead_and_sample_profile(self):
         fixtures = Path(__file__).resolve().parent / "fixtures"
@@ -79,6 +91,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["ld"]["linked_variant_count"], 2)
         self.assertEqual(result["ld"]["heatmap"]["plotted_count"], 2)
         self.assertEqual(result["ld"]["heatmap"]["matrix"][0][1], result["ld"]["heatmap"]["matrix"][1][0])
+        self.assertEqual(result["ld"]["heatmap"]["matrix_dprime"][0][1], result["ld"]["heatmap"]["matrix_dprime"][1][0])
 
         profile = analyzer.sample_lead_profile({
             "path": str(fixtures / "tiny.vcf"), "samples": ["S2"],

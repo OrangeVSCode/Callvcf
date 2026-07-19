@@ -191,6 +191,15 @@ summary { padding: 10px 16px; color: var(--brand); font-size: 12px; font-weight:
 .ld-figure-toolbar select { width: 66px; height: 36px; }
 .regional-ld-figure, .trend-chart { width: 100%; overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
 .regional-ld-figure svg { display: block; width: 100%; min-width: 720px; height: auto; }
+.ld-dual-figures { display: grid; gap: 22px; }
+.ld-metric-heading { display: flex; align-items: baseline; gap: 10px; margin: 18px 0 6px; color: var(--ink); }
+.ld-metric-heading span { color: var(--muted); font-size: .86rem; }
+.tool-manager { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; padding: 14px 0; }
+.tool-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.tool-card div { display: grid; gap: 3px; }
+.tool-card small { color: var(--muted); }
+.tool-manager > p { grid-column: 1 / -1; margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 720px) { .tool-manager { grid-template-columns: 1fr; } .tool-manager > p { grid-column: auto; } }
 .trend-chart svg { display: block; width: 100%; min-width: 760px; height: auto; max-height: 820px; }
 .subheading { margin-top: 18px !important; }
 .result-split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }

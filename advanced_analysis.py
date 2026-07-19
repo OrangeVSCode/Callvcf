@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 
 from vcf_service import VCFError, parse_loci
+from tool_manager import resolve_ldblockshow
 
 
 def genotype_dosage(gt):
@@ -36,6 +37,65 @@ def pairwise_r2(left, right, min_samples=20):
         return None, n
     cov = sum((a - mean_a) * (b - mean_b) for a, b in pairs)
     return max(0.0, min(1.0, (cov * cov) / (var_a * var_b))), n
+
+
+def pairwise_dprime(left, right, min_samples=20, max_iter=200, tolerance=1e-10):
+    """Estimate |D'| for two unphased diploid biallelic loci with EM."""
+    pairs = [(int(a), int(b)) for a, b in zip(left, right)
+             if a is not None and b is not None]
+    n = len(pairs)
+    if n < min_samples:
+        return None, n
+    p_a = sum(a for a, _ in pairs) / (2.0 * n)
+    p_b = sum(b for _, b in pairs) / (2.0 * n)
+    if not 0 < p_a < 1 or not 0 < p_b < 1:
+        return None, n
+
+    haplotypes = ((0, 0), (0, 1), (1, 0), (1, 1))
+    freq = {
+        (0, 0): (1 - p_a) * (1 - p_b),
+        (0, 1): (1 - p_a) * p_b,
+        (1, 0): p_a * (1 - p_b),
+        (1, 1): p_a * p_b,
+    }
+    compatible = {}
+    for ga in range(3):
+        for gb in range(3):
+            compatible[(ga, gb)] = [
+                (h1, h2) for i, h1 in enumerate(haplotypes)
+                for h2 in haplotypes[i:]
+                if h1[0] + h2[0] == ga and h1[1] + h2[1] == gb
+            ]
+
+    for _ in range(max_iter):
+        counts = {h: 0.0 for h in haplotypes}
+        for genotype in pairs:
+            phases = compatible[genotype]
+            weights = [freq[h1] * freq[h2] * (1.0 if h1 == h2 else 2.0)
+                       for h1, h2 in phases]
+            total = sum(weights)
+            if total <= 0:
+                continue
+            for (h1, h2), weight in zip(phases, weights):
+                posterior = weight / total
+                counts[h1] += posterior
+                counts[h2] += posterior
+        updated = {h: counts[h] / (2.0 * n) for h in haplotypes}
+        if max(abs(updated[h] - freq[h]) for h in haplotypes) < tolerance:
+            freq = updated
+            break
+        freq = updated
+
+    p_a = freq[(1, 0)] + freq[(1, 1)]
+    p_b = freq[(0, 1)] + freq[(1, 1)]
+    d_value = freq[(1, 1)] - p_a * p_b
+    if d_value >= 0:
+        d_max = min(p_a * (1 - p_b), (1 - p_a) * p_b)
+    else:
+        d_max = min(p_a * p_b, (1 - p_a) * (1 - p_b))
+    if d_max <= 0:
+        return None, n
+    return max(0.0, min(1.0, abs(d_value) / d_max)), n
 
 
 def parse_region(raw):
@@ -97,20 +157,25 @@ def build_ld_heatmap(usable, wanted_keys, min_samples, max_variants=120, priorit
         )[:max_variants]
     selected.sort(key=lambda item: item[0]["pos"])
     variants = [_record_summary(record) for record, _ in selected]
-    matrix = []
+    matrix_r2, matrix_dprime = [], []
     for i, (_, left) in enumerate(selected):
-        row = []
+        row_r2, row_dprime = [], []
         for j, (_, right) in enumerate(selected):
             if i == j:
-                value = 1.0
+                r2_value = dprime_value = 1.0
             else:
-                value, _ = pairwise_r2(left, right, min_samples)
-            row.append(None if value is None else round(value, 6))
-        matrix.append(row)
+                r2_value, _ = pairwise_r2(left, right, min_samples)
+                dprime_value, _ = pairwise_dprime(left, right, min_samples)
+            row_r2.append(None if r2_value is None else round(r2_value, 6))
+            row_dprime.append(None if dprime_value is None else round(dprime_value, 6))
+        matrix_r2.append(row_r2)
+        matrix_dprime.append(row_dprime)
     return {
-        "variants": variants, "matrix": matrix, "original_count": original_count,
+        "variants": variants, "matrix": matrix_r2, "matrix_r2": matrix_r2,
+        "matrix_dprime": matrix_dprime, "original_count": original_count,
         "plotted_count": len(variants), "downsampled": original_count > len(variants),
         "max_variants": max_variants,
+        "dprime_method": "EM estimate of absolute D' from unphased diploid genotypes",
     }
 
 
@@ -282,6 +347,71 @@ def locate_gene(path_text, chrom, pos):
             matches.append({**gene, "relation": relation, "distance": distance,
                             "overlapping_feature": None})
     return {"status": "ok", "path": str(path), "matches": matches}
+
+
+def gene_models_in_region(path_text, chrom, start, end, max_genes=80, max_features=2000):
+    """Return compact gene/transcript structures overlapping a plotted region."""
+    if not path_text:
+        return {"status": "not_configured", "models": []}
+    path = _existing_file(path_text, "GFF3/GTF")
+    items = []
+    with _open_text(path) as handle:
+        for line in handle:
+            if not line or line.startswith("#"):
+                continue
+            parts = line.rstrip("\r\n").split("\t")
+            if len(parts) < 9 or parts[0] != str(chrom):
+                continue
+            try:
+                feature_start, feature_end = int(parts[3]), int(parts[4])
+            except ValueError:
+                continue
+            if feature_end < start or feature_start > end:
+                continue
+            feature_type = parts[2].lower()
+            if feature_type not in {
+                "gene", "pseudogene", "mrna", "transcript", "exon", "cds",
+                "five_prime_utr", "three_prime_utr", "utr"
+            }:
+                continue
+            attrs = _parse_attributes(parts[8])
+            item_id = attrs.get("ID") or attrs.get("transcript_id") or attrs.get("gene_id") or ""
+            parent = attrs.get("Parent") or attrs.get("transcript_id") or attrs.get("gene_id") or ""
+            items.append({
+                "type": feature_type, "start": feature_start, "end": feature_end,
+                "strand": parts[6], "id": item_id, "parent": parent,
+                "gene_id": attrs.get("gene_id") or "",
+                "name": attrs.get("gene_name") or attrs.get("Name") or attrs.get("gene") or item_id,
+            })
+            if len(items) >= max_features:
+                break
+
+    genes = [item for item in items if item["type"] in {"gene", "pseudogene"}]
+    transcripts = {item["id"]: item for item in items
+                   if item["type"] in {"mrna", "transcript"} and item["id"]}
+    transcript_gene = {key: value["parent"] or value["gene_id"] for key, value in transcripts.items()}
+    models = []
+    for index, gene in enumerate(genes[:max_genes]):
+        gene_key = gene["id"] or gene["gene_id"] or "gene_{}".format(index + 1)
+        features = []
+        for item in items:
+            if item is gene or item["type"] in {"gene", "pseudogene"}:
+                continue
+            parent_tokens = [x.strip() for x in item["parent"].split(",") if x.strip()]
+            belongs = item["gene_id"] == gene_key or gene_key in parent_tokens
+            if not belongs:
+                belongs = any(transcript_gene.get(token) == gene_key for token in parent_tokens)
+            if belongs:
+                features.append({k: item[k] for k in ("type", "start", "end", "strand", "id", "parent")})
+        models.append({
+            "id": gene_key, "name": gene["name"] or gene_key,
+            "start": gene["start"], "end": gene["end"], "strand": gene["strand"],
+            "features": features,
+        })
+    return {
+        "status": "ok", "path": str(path), "chrom": str(chrom), "start": start, "end": end,
+        "models": models, "truncated": len(genes) > max_genes or len(items) >= max_features,
+    }
 
 
 def domain_matches(path_text, identifiers):
@@ -649,11 +779,11 @@ class AdvancedAnalyzer:
             wsl_executable = shutil.which("wsl.exe") or shutil.which("wsl")
             if not wsl_executable:
                 raise VCFError("未找到 WSL；请先启用 Windows Subsystem for Linux，或取消 WSL 模式")
-            executable = executable_text or "LDBlockShow"
+            executable = resolve_ldblockshow(executable_text) or executable_text or "LDBlockShow"
         else:
-            executable = executable_text if executable_text and Path(executable_text).is_file() else shutil.which(executable_text or "LDBlockShow")
+            executable = resolve_ldblockshow(executable_text)
             if not executable:
-                raise VCFError("未找到 LDBlockShow；请填写可执行文件路径，Windows 可勾选 WSL 模式")
+                raise VCFError("未找到 LDBlockShow；可在页面中一键安装，Windows 需要启用 WSL")
         output_text = str(payload.get("output_dir") or "").strip()
         if not output_text:
             output_text = str(Path(payload["path"]).resolve().parent / "CallVCF_LDBlockShow")
@@ -675,11 +805,19 @@ class AdvancedAnalyzer:
 
         if use_wsl:
             input_vcf, prefix_arg = wsl_path(input_vcf), wsl_path(prefix_arg)
+            if Path(str(executable)).is_file():
+                executable = wsl_path(executable)
         block_cut = "{}:0.90".format(payload.get("r2_threshold", 0.6))
+        metric = str(payload.get("ldblockshow_metric") or "4")
+        block_type = str(payload.get("ldblockshow_block_type") or "1")
+        if metric not in {"1", "2", "3", "4"}:
+            raise VCFError("LDBlockShow LD 指标必须为 1、2、3 或 4")
+        if block_type not in {"1", "2", "3", "4", "5"}:
+            raise VCFError("LDBlockShow block 类型必须为 1 到 5")
         tool_args = ["-InVCF", input_vcf, "-OutPut", prefix_arg,
                      "-Region", "{}:{}:{}".format(region["chrom"], region["start"], region["end"]),
-                     "-SeleVar", "2", "-BlockType", "3", "-BlockCut", block_cut,
-                     "-TopSite", "{}:{}".format(lead["chrom"], lead["pos"]), "-OutPng"]
+                     "-SeleVar", metric, "-BlockType", block_type, "-BlockCut", block_cut,
+                     "-TopSite", "{}:{}".format(lead["chrom"], lead["pos"]), "-OutPng", "-OutPdf"]
         gff_path = str(payload.get("gff_path") or "").strip()
         if gff_path:
             gff_value = str(_existing_file(gff_path, "GFF3/GTF"))
@@ -726,7 +864,7 @@ class AdvancedAnalyzer:
         if not 10 <= max_heatmap <= 250:
             raise VCFError("热图 SNP 数必须在 10 到 250 之间")
         options = payload.get("options") or {}
-        need_ld = bool(options.get("ld") or options.get("phenotype") or options.get("ldblockshow"))
+        need_ld = bool(options.get("ld") or options.get("gene_track") or options.get("phenotype") or options.get("ldblockshow"))
         result = {"lead_locus": "{}:{}".format(chrom, lead_pos), "options": options, "ld_mode": mode}
 
         _, _, _, lead_records = self.service.query_records(path, "{}:{}".format(chrom, lead_pos))
@@ -747,6 +885,12 @@ class AdvancedAnalyzer:
                 ld_result = self.calculate_ld(path, chrom, lead_pos, window_bp, threshold, min_samples, max_heatmap)
             result["ld"] = ld_result
         region = ld_result["linkage_region"] if ld_result else {"chrom": chrom, "start": lead_pos, "end": lead_pos}
+
+        if ld_result and options.get("gene_track"):
+            plot_region = ld_result["search_region"]
+            result["gene_track"] = gene_models_in_region(
+                payload.get("gff_path"), plot_region["chrom"], plot_region["start"], plot_region["end"]
+            )
 
         gene_result = None
         if options.get("gene") or options.get("domain"):

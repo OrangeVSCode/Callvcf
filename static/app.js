@@ -276,12 +276,40 @@ function r2Color(value) {
   return `rgb(${r},${g},${b})`;
 }
 
-function renderRegionalLdFigure(data) {
+function geneTrackMarkup(data, x, top, plotW) {
+  const models = (data.gene_track?.models || []).slice(0, 24);
+  if (!models.length) return {height: 44, markup: `<text x="${x}" y="${top+22}" fill="#71827a">Gene structure: provide a GFF3/GTF file and select “基因结构轨道”</text>`};
+  const region = data.ld.search_region, span = Math.max(1, region.end-region.start);
+  const px = pos => x+(pos-region.start)/span*plotW;
+  const lanes = [];
+  models.forEach(model => {
+    let lane = lanes.findIndex(end => model.start > end);
+    if (lane < 0) { lane = lanes.length; lanes.push(model.end); } else lanes[lane] = model.end;
+    model._lane = Math.min(lane, 5);
+  });
+  const height = 50 + Math.min(6, lanes.length)*30;
+  const markup = models.filter(model => model._lane < 6).map(model => {
+    const y = top+42+model._lane*30, x1=px(model.start), x2=px(model.end);
+    const direction = model.strand === "-" ? -1 : 1;
+    const arrows=[];
+    for(let ax=x1+18; ax<x2-8; ax+=32) arrows.push(`<path d="M ${ax} ${y-3} l ${6*direction} 3 l ${-6*direction} 3" fill="none" stroke="#46635a"/>`);
+    const features=(model.features||[]).filter(f=>["exon","cds","five_prime_utr","three_prime_utr","utr"].includes(f.type)).map(f=>{
+      const fx1=px(f.start), fx2=px(f.end), isCds=f.type==="cds", h=isCds?14:9;
+      return `<rect x="${Math.min(fx1,fx2)}" y="${y-h/2}" width="${Math.max(1,Math.abs(fx2-fx1))}" height="${h}" fill="${isCds?'#2c6b5a':'#8fb9aa'}"><title>${escapeHtml(model.name)} · ${f.type} · ${f.start}-${f.end}</title></rect>`;
+    }).join("");
+    return `<g><line x1="${x1}" x2="${x2}" y1="${y}" y2="${y}" stroke="#46635a" stroke-width="1.5"/>${arrows.join("")}${features}<text x="${x1}" y="${y-10}" fill="#344b43">${escapeHtml(model.name)} (${escapeHtml(model.strand)})</text></g>`;
+  }).join("");
+  return {height, markup:`<text x="${x}" y="${top+12}" fill="#344b43">Gene structure</text>${markup}`};
+}
+
+function renderRegionalLdMetric(data, metric) {
   const ld = data.ld, heatmap = ld?.heatmap;
   if (!heatmap?.variants?.length) return '<div class="empty-state">达到阈值的位点不足，无法绘制 LD 热图。</div>';
-  const width = 1000, height = 620, left = 76, right = 24, plotW = width - left - right;
+  const width = 1000, left = 76, right = 24, plotW = width-left-right;
   const region = ld.search_region, span = Math.max(1, region.end - region.start);
   const x = pos => left + (pos - region.start) / span * plotW;
+  const isDprime = metric === "dprime", matrix = isDprime ? heatmap.matrix_dprime : (heatmap.matrix_r2 || heatmap.matrix);
+  const metricLabel = isDprime ? "D′" : "R²", metricSlug = isDprime ? "Dprime" : "R2";
   const association = (data.phenotype?.records || []).filter(r => r.chrom === region.chrom && r.pos >= region.start && r.pos <= region.end);
   const maxLogP = Math.max(1, ...association.map(r => -Math.log10(Math.max(Number(r.pvalue), 1e-300))));
   const assocTop = 24, assocBottom = 185, assocH = assocBottom - assocTop;
@@ -289,13 +317,14 @@ function renderRegionalLdFigure(data) {
     const value = -Math.log10(Math.max(Number(r.pvalue), 1e-300));
     return `<circle cx="${x(r.pos).toFixed(2)}" cy="${(assocBottom - value / maxLogP * assocH).toFixed(2)}" r="2.2" fill="#7d9088"><title>${escapeHtml(r.trait)} · ${escapeHtml(r.marker)} · P=${r.pvalue}</title></circle>`;
   }).join("");
+  const geneTrack = geneTrackMarkup(data, left, 218, plotW), blockTop=218+geneTrack.height;
   const leads = ld.lead_results?.length ? ld.lead_results : [{lead_record: ld.lead_record, block: ld.linkage_region}];
   const blockMarks = leads.map((item, i) => {
-    const y = 216 + (i % 3) * 13, block = item.block || ld.linkage_region;
+    const y = blockTop+18+(i%3)*13, block=item.block||ld.linkage_region;
     return `<line x1="${x(block.start)}" x2="${x(block.end)}" y1="${y}" y2="${y}" stroke="#d14c4c" stroke-width="5" opacity=".72"><title>${escapeHtml(item.lead_record.key)} · ${block.start}-${block.end}</title></line><path d="M ${x(item.lead_record.pos)-5} ${y-9} L ${x(item.lead_record.pos)+5} ${y-9} L ${x(item.lead_record.pos)} ${y-1} Z" fill="#9f252d"/>`;
   }).join("");
-  const variants = heatmap.variants, matrix = heatmap.matrix, n = variants.length;
-  const heatTop = 280, heatH = 270, unitX = plotW / Math.max(1, n), unitY = heatH / Math.max(1, n);
+  const variants=heatmap.variants, n=variants.length, heatTop=blockTop+76, heatH=300;
+  const height=heatTop+heatH+76, unitX=plotW/Math.max(1,n), unitY=heatH/Math.max(1,n);
   const cells = [];
   for (let i = 0; i < n; i++) {
     for (let j = 0; j <= i; j++) {
@@ -303,21 +332,25 @@ function renderRegionalLdFigure(data) {
       const cx = left + (i + j + 1) * unitX / 2;
       const cy = heatTop + (i - j + 1) * unitY / 2;
       const dx = unitX / 2 + .35, dy = unitY / 2 + .35;
-      cells.push(`<path d="M ${cx} ${cy-dy} L ${cx+dx} ${cy} L ${cx} ${cy+dy} L ${cx-dx} ${cy} Z" fill="${r2Color(value)}"><title>${escapeHtml(variants[j].key)} × ${escapeHtml(variants[i].key)} · r²=${value == null ? "NA" : value}</title></path>`);
+      cells.push(`<path d="M ${cx} ${cy-dy} L ${cx+dx} ${cy} L ${cx} ${cy+dy} L ${cx-dx} ${cy} Z" fill="${r2Color(value)}"><title>${escapeHtml(variants[j].key)} × ${escapeHtml(variants[i].key)} · ${metricLabel}=${value == null ? "NA" : value}</title></path>`);
     }
   }
-  const leadGuides = leads.map(item => `<line x1="${x(item.lead_record.pos)}" x2="${x(item.lead_record.pos)}" y1="${assocTop}" y2="260" stroke="#c64048" stroke-width="1.2" stroke-dasharray="6 5"/>`).join("");
+  const leadGuides=leads.map(item=>`<line x1="${x(item.lead_record.pos)}" x2="${x(item.lead_record.pos)}" y1="${assocTop}" y2="${heatTop-18}" stroke="#c64048" stroke-width="1.2" stroke-dasharray="6 5"/>`).join("");
   const yTicks = [0, .25, .5, .75, 1].map(v => `<line x1="${left}" x2="${width-right}" y1="${assocBottom-v*assocH}" y2="${assocBottom-v*assocH}" stroke="#e0e7e3"/><text x="${left-10}" y="${assocBottom-v*assocH+4}" text-anchor="end" fill="#54675f">${(v*maxLogP).toFixed(maxLogP > 10 ? 0 : 1)}</text>`).join("");
-  const legend = [0, .2, .4, .6, .8, 1].map((v, i) => `<rect x="${left+i*30}" y="585" width="30" height="12" fill="${r2Color(v)}"/><text x="${left+i*30}" y="612" fill="#54675f">${v}</text>`).join("");
-  return `<div class="ld-figure-toolbar"><span>${heatmap.plotted_count} / ${heatmap.original_count} 个连锁位点${heatmap.downsampled ? "（已按连锁强度抽样）" : ""}</span><label>PNG 倍率 <select id="ldPngScale"><option>2</option><option selected>4</option><option>6</option></select></label><button class="secondary" id="exportLdPngBtn">导出高清 PNG</button><button class="secondary" id="exportLdPdfBtn">导出矢量 PDF</button></div>
-    <div class="regional-ld-figure"><svg id="regionalLdSvg" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="regionalLdTitle regionalLdDesc"><title id="regionalLdTitle">区域关联与三角形 LD 热图</title><desc id="regionalLdDesc">上部为区域 GWAS 显著性，中部为 Lead 连锁跨度，下部为连锁位点之间的成对 r²。</desc>
+  const legendY=height-43, legend=[0,.2,.4,.6,.8,1].map((v,i)=>`<rect x="${left+i*30}" y="${legendY}" width="30" height="12" fill="${r2Color(v)}"/><text x="${left+i*30}" y="${legendY+27}" fill="#54675f">${v}</text>`).join("");
+  return `<div class="ld-metric-heading"><strong>${metricLabel} LD 热图</strong><span>${isDprime ? "|D′|（未定相基因型使用 EM 估计）" : "等位基因剂量相关平方"}</span></div><div class="ld-figure-toolbar"><span>${heatmap.plotted_count} / ${heatmap.original_count} 个连锁位点${heatmap.downsampled ? "（已按连锁强度抽样）" : ""}</span><label>PNG 倍率 <select class="ld-png-scale" data-metric="${metric}"><option>2</option><option selected>4</option><option>6</option></select></label><button class="secondary export-ld-png" data-metric="${metric}">导出高清 PNG</button><button class="secondary export-ld-pdf" data-metric="${metric}">导出矢量 PDF</button></div>
+    <div class="regional-ld-figure"><svg id="regionalLdSvg-${metric}" viewBox="0 0 ${width} ${height}" role="img" aria-label="区域关联、基因结构、Lead 连锁跨度与 ${metricLabel} 三角热图"><title>CallVCF ${metricLabel} LD heatmap</title><desc>上部为区域关联信号和基因结构，中部为 Lead 连锁跨度，下部为成对 ${metricLabel}。</desc>
       <rect width="${width}" height="${height}" fill="#ffffff"/>${yTicks}${assocMarks}${leadGuides}
       <line x1="${left}" x2="${width-right}" y1="${assocBottom}" y2="${assocBottom}" stroke="#71827a"/>
       <text x="18" y="110" transform="rotate(-90 18 110)" fill="#344b43">-log10(P)</text>
       <text x="${left}" y="205" fill="#54675f">${escapeHtml(region.chrom)}:${formatNumber(region.start)}</text><text x="${width-right}" y="205" text-anchor="end" fill="#54675f">${escapeHtml(region.chrom)}:${formatNumber(region.end)}</text>
-      ${blockMarks}<text x="${left}" y="266" fill="#344b43">Lead-linked spans</text>${cells.join("")}
-      <text x="${left}" y="575" fill="#344b43">Pairwise R²</text>${legend}
+      ${geneTrack.markup}${blockMarks}<text x="${left}" y="${blockTop+62}" fill="#344b43">Lead-linked spans</text>${cells.join("")}
+      <text x="${left}" y="${legendY-10}" fill="#344b43">Pairwise ${metricLabel}</text>${legend}
     </svg></div>`;
+}
+
+function renderRegionalLdFigure(data) {
+  return `<div class="ld-dual-figures">${renderRegionalLdMetric(data,"r2")}${renderRegionalLdMetric(data,"dprime")}</div>`;
 }
 
 function downloadBlob(blob, name) {
@@ -326,10 +359,10 @@ function downloadBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(link.href), 1500);
 }
 
-function exportLdPng() {
-  const svg = $("regionalLdSvg");
+function exportLdPng(metric="r2") {
+  const svg = $(`regionalLdSvg-${metric}`);
   if (!svg) throw new Error("当前没有可导出的热图");
-  const scale = Number($("ldPngScale")?.value || 4);
+  const scale = Number(document.querySelector(`.ld-png-scale[data-metric="${metric}"]`)?.value || 4);
   const clone = svg.cloneNode(true), view = svg.viewBox.baseVal;
   clone.setAttribute("width", view.width * scale); clone.setAttribute("height", view.height * scale);
   const blob = new Blob([new XMLSerializer().serializeToString(clone)], {type: "image/svg+xml;charset=utf-8"});
@@ -337,7 +370,7 @@ function exportLdPng() {
   image.onload = () => {
     const canvas = document.createElement("canvas"); canvas.width = view.width * scale; canvas.height = view.height * scale;
     const ctx = canvas.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-    URL.revokeObjectURL(url); canvas.toBlob(out => downloadBlob(out, `CallVCF_LD_heatmap_${scale}x.png`), "image/png");
+    URL.revokeObjectURL(url); canvas.toBlob(out => downloadBlob(out, `CallVCF_LD_${metric}_${scale}x.png`), "image/png");
   };
   image.onerror = () => { URL.revokeObjectURL(url); toast("PNG 导出失败", true); };
   image.src = url;
@@ -345,18 +378,28 @@ function exportLdPng() {
 
 function pdfEscape(value) { return String(value).replace(/[\\()]/g, "\\$&"); }
 
-function exportLdPdf() {
+function exportLdPdf(metric="r2") {
   const result = state.lastLeadResult, ld = result?.ld, heatmap = ld?.heatmap;
   if (!heatmap?.variants?.length) throw new Error("当前没有可导出的热图");
+  const isDprime=metric==="dprime", metricLabel=isDprime?"Dprime":"R2";
+  const matrix=isDprime?heatmap.matrix_dprime:(heatmap.matrix_r2||heatmap.matrix);
   const pageW = 842, pageH = 595, left = 58, right = 24, plotW = pageW-left-right;
   const heatBottom = 58, heatH = 330, n = heatmap.variants.length, cellW = plotW/n, cellH = heatH/n;
   const region = ld.search_region, regionSpan = Math.max(1, region.end-region.start), px = pos => left+(pos-region.start)/regionSpan*plotW;
   const association = (result.phenotype?.records || []).filter(r => r.chrom===region.chrom && r.pos>=region.start && r.pos<=region.end);
   const maxLogP = Math.max(1, ...association.map(r => -Math.log10(Math.max(Number(r.pvalue),1e-300))));
-  const commands = ["1 1 1 rg 0 0 842 595 re f", "0.15 0.22 0.19 rg", `BT /F1 15 Tf 58 572 Td (${pdfEscape("CallVCF regional association and LD")}) Tj ET`, `BT /F1 8 Tf 58 557 Td (${pdfEscape(`${region.chrom}:${region.start}-${region.end}; ${heatmap.plotted_count} linked variants; pairwise R2`)}) Tj ET`, "0.55 0.62 0.59 RG 0.6 w 58 468 m 818 468 l S"];
+  const commands = ["1 1 1 rg 0 0 842 595 re f", "0.15 0.22 0.19 rg", `BT /F1 15 Tf 58 572 Td (${pdfEscape(`CallVCF regional association, genes and ${metricLabel} LD`)}) Tj ET`, `BT /F1 8 Tf 58 557 Td (${pdfEscape(`${region.chrom}:${region.start}-${region.end}; ${heatmap.plotted_count} linked variants; pairwise ${metricLabel}`)}) Tj ET`, "0.55 0.62 0.59 RG 0.6 w 58 468 m 818 468 l S"];
   association.slice(0,12000).forEach(r => {
     const y=468+(-Math.log10(Math.max(Number(r.pvalue),1e-300))/maxLogP)*68;
     commands.push(`0.35 0.45 0.41 rg ${(px(r.pos)-1).toFixed(2)} ${(y-1).toFixed(2)} 2 2 re f`);
+  });
+  (result.gene_track?.models||[]).slice(0,12).forEach((gene,i)=>{
+    const y=432-(i%4)*10, gx1=px(gene.start), gx2=px(gene.end);
+    commands.push(`0.25 0.40 0.34 RG 0.8 w ${gx1.toFixed(2)} ${y} m ${gx2.toFixed(2)} ${y} l S`);
+    (gene.features||[]).filter(f=>f.type==="exon"||f.type==="cds").forEach(f=>{
+      const fx1=px(f.start), fx2=px(f.end), h=f.type==="cds"?6:4;
+      commands.push(`0.18 0.42 0.34 rg ${Math.min(fx1,fx2).toFixed(2)} ${(y-h/2).toFixed(2)} ${Math.max(1,Math.abs(fx2-fx1)).toFixed(2)} ${h} re f`);
+    });
   });
   const leads = ld.lead_results?.length ? ld.lead_results : [{lead_record:ld.lead_record,block:ld.linkage_region}];
   leads.forEach((item,i) => {
@@ -366,13 +409,13 @@ function exportLdPdf() {
   });
   commands.push("0.25 0.34 0.30 rg BT /F1 8 Tf 58 430 Td (Lead-linked spans) Tj ET");
   for (let i = 0; i < n; i++) for (let j = 0; j <= i; j++) {
-    const value = heatmap.matrix[i]?.[j];
+    const value = matrix[i]?.[j];
     const v = value == null ? 0 : Math.max(0, Math.min(1, Number(value)));
     const r = (255 - 18 * (1-v))/255, g = (246 - 202*v)/255, b = (220 - 184*v)/255;
     commands.push(`${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} rg ${(left+j*cellW).toFixed(2)} ${(heatBottom+(n-i-1)*cellH).toFixed(2)} ${(cellW+.1).toFixed(2)} ${(cellH+.1).toFixed(2)} re f`);
   }
   commands.push(`0.2 0.3 0.26 RG 0.5 w ${left} ${heatBottom} ${plotW} ${heatH} re S`);
-  commands.push("0.25 0.34 0.30 rg BT /F1 8 Tf 58 42 Td (Pairwise R2: 0 = pale, 1 = red) Tj ET");
+  commands.push(`0.25 0.34 0.30 rg BT /F1 8 Tf 58 42 Td (Pairwise ${metricLabel}: 0 = pale, 1 = red) Tj ET`);
   const content = commands.join("\n");
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
@@ -385,7 +428,7 @@ function exportLdPdf() {
   objects.forEach((obj, i) => { offsets.push(new TextEncoder().encode(pdf).length); pdf += `${i+1} 0 obj\n${obj}\nendobj\n`; });
   const xref = new TextEncoder().encode(pdf).length;
   pdf += `xref\n0 ${objects.length+1}\n0000000000 65535 f \n${offsets.slice(1).map(x => String(x).padStart(10,"0")+" 00000 n ").join("\n")}\ntrailer\n<< /Size ${objects.length+1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
-  downloadBlob(new Blob([pdf], {type:"application/pdf"}), "CallVCF_LD_heatmap.pdf");
+  downloadBlob(new Blob([pdf], {type:"application/pdf"}), `CallVCF_LD_${metric}.pdf`);
 }
 
 function renderLeadResult(data) {
@@ -435,7 +478,7 @@ function renderLeadResult(data) {
 }
 
 function saveAdvancedSettings() {
-  const ids = ["gffPath", "annotationPath", "domainPath", "phenotypePath", "ldblockshowPath", "outputDir", "ldWindow", "ldThreshold", "ldMinSamples", "ldMode", "ldRegion", "leadLoci", "heatmapMaxVariants", "profilePhenotypePath", "profilePThreshold", "traitDirections"];
+  const ids = ["gffPath", "annotationPath", "domainPath", "phenotypePath", "ldblockshowPath", "outputDir", "ldblockshowMetric", "ldblockshowBlockType", "ldWindow", "ldThreshold", "ldMinSamples", "ldMode", "ldRegion", "leadLoci", "heatmapMaxVariants", "profilePhenotypePath", "profilePThreshold", "traitDirections"];
   localStorage.setItem("vcfExplorerAdvanced", JSON.stringify(Object.fromEntries(ids.map(id => [id, $(id).value]))));
 }
 
@@ -455,6 +498,41 @@ async function browseResource(button) {
   finally { button.disabled = false; }
 }
 
+function renderToolStatus(data) {
+  state.tools = data;
+  const plink = data.plink, ldb = data.ldblockshow;
+  $("plinkStatus").textContent = plink.installed ? `已就绪 · ${plink.path}` : `未安装 · ${plink.bundled_version}`;
+  $("ldblockshowStatus").textContent = ldb.installed ? (ldb.requires_wsl && !ldb.wsl_available ? `已下载 · 需先安装 WSL` : `已就绪 · ${ldb.path}`) : (ldb.requires_wsl && !ldb.wsl_available ? "未安装 · 需先启用 WSL" : "未安装");
+  $("toolRoot").textContent = `工具目录：${data.tool_root}；PLINK GPL-3.0，LDBlockShow MIT。`;
+  document.querySelectorAll(".install-tool").forEach(button => {
+    const installed = data[button.dataset.tool]?.installed;
+    button.textContent = installed ? "重新安装" : "一键安装";
+  });
+  if (ldb.installed && !$("ldblockshowPath").value.trim()) $("ldblockshowPath").value = ldb.path;
+  if (data.platform === "Windows" && ldb.installed) $("ldblockshowWsl").checked = true;
+}
+
+async function loadToolStatus() {
+  try {
+    const response = await fetch("/api/tools/status", {cache:"no-store"});
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    renderToolStatus(result.data);
+  } catch (error) {
+    $("plinkStatus").textContent = "检测失败"; $("ldblockshowStatus").textContent = "检测失败";
+  }
+}
+
+async function installTool(button) {
+  const tool = button.dataset.tool, oldText = button.textContent;
+  button.disabled = true; button.textContent = "正在下载…";
+  try {
+    const result = await api("/api/tools/install", {tool});
+    renderToolStatus(result); toast(`${tool === "plink" ? "PLINK" : "LDBlockShow"} 安装完成`);
+  } catch (error) { toast(error.message, true); button.textContent = oldText; }
+  finally { button.disabled = false; }
+}
+
 async function runLeadAnalysis() {
   const button = $("leadRunBtn"), target = $("leadResult");
   try {
@@ -462,7 +540,7 @@ async function runLeadAnalysis() {
     const leadText = mode === "multi_lead_region" ? $("leadLoci").value.trim() : $("leadLocus").value.trim();
     const leadLocus = leadText.split(/[\s,;]+/).find(Boolean) || lociText(false).split(/[\s,;]+/).find(Boolean);
     if (!leadLocus) throw new Error("请输入一个 Lead 位点");
-    const options = { ld: $("optLd").checked, gene: $("optGene").checked, function: $("optFunction").checked,
+    const options = { ld: $("optLd").checked, gene_track: $("optGeneTrack").checked, gene: $("optGene").checked, function: $("optFunction").checked,
       domain: $("optDomain").checked, phenotype: $("optPhenotype").checked, ldblockshow: $("optLdblockshow").checked };
     if (!Object.values(options).some(Boolean)) throw new Error("请至少勾选一项分析功能");
     if (mode === "multi_lead_region" && !$("ldRegion").value.trim()) throw new Error("多 Lead 模式请输入指定区间");
@@ -472,6 +550,7 @@ async function runLeadAnalysis() {
       gff_path: $("gffPath").value.trim(), annotation_path: $("annotationPath").value.trim(),
       domain_path: $("domainPath").value.trim(), phenotype_path: $("phenotypePath").value.trim(),
       ldblockshow_path: $("ldblockshowPath").value.trim(), ldblockshow_wsl: $("ldblockshowWsl").checked,
+      ldblockshow_metric: $("ldblockshowMetric").value, ldblockshow_block_type: $("ldblockshowBlockType").value,
       output_dir: $("outputDir").value.trim() };
     saveAdvancedSettings();
     setLoading(target, button, options.ldblockshow ? "正在计算 LD 并运行 LDBlockShow…" : "正在分析 Lead 位点…");
@@ -595,11 +674,13 @@ function initEvents() {
     $("ldWindow").closest("label").classList.toggle("hidden", multi);
   });
   document.querySelectorAll(".browse-resource").forEach(btn => btn.addEventListener("click", () => browseResource(btn)));
+  document.querySelectorAll(".install-tool").forEach(btn => btn.addEventListener("click", () => installTool(btn)));
   $("leadResult").addEventListener("click", e => {
     if (e.target.closest("#copyLinkedBtn")) copyLinked().catch(err => toast(err.message, true));
     if (e.target.closest("#downloadLinkedBtn")) downloadLinked();
-    if (e.target.closest("#exportLdPngBtn")) { try { exportLdPng(); } catch (err) { toast(err.message, true); } }
-    if (e.target.closest("#exportLdPdfBtn")) { try { exportLdPdf(); } catch (err) { toast(err.message, true); } }
+    const pngButton=e.target.closest(".export-ld-png"), pdfButton=e.target.closest(".export-ld-pdf");
+    if (pngButton) { try { exportLdPng(pngButton.dataset.metric); } catch (err) { toast(err.message, true); } }
+    if (pdfButton) { try { exportLdPdf(pdfButton.dataset.metric); } catch (err) { toast(err.message, true); } }
   });
   $("sampleLeadResult").addEventListener("click", e => { if (e.target.closest("#downloadProfileBtn")) downloadProfile(); });
   document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => {
@@ -615,6 +696,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (saved) $("vcfPath").value = saved;
   initEvents();
   restoreAdvancedSettings();
+  loadToolStatus();
   $("ldMode").dispatchEvent(new Event("change"));
   checkHealth();
 });

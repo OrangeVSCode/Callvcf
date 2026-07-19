@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Install and discover optional third-party command-line tools."""
+
+import hashlib
+import json
+import os
+import platform
+import shutil
+import stat
+import subprocess
+import tempfile
+import urllib.request
+import zipfile
+from pathlib import Path
+
+from vcf_service import VCFError
+
+
+PLINK_VERSION = "1.9 beta 7.11 (2025-08-19)"
+PLINK_URLS = {
+    "Windows": "https://s3.amazonaws.com/plink1-assets/plink_win64_20250819.zip",
+    "Linux": "https://s3.amazonaws.com/plink1-assets/plink_linux_x86_64_20250819.zip",
+}
+LDBLOCKSHOW_URL = "https://codeload.github.com/hewm2008/LDBlockShow/zip/refs/heads/main"
+
+
+def tool_root():
+    override = os.environ.get("CALLVCF_TOOL_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    if platform.system() == "Windows":
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    return (base / "CallVCF" / "tools").resolve()
+
+
+def _download(url, destination, max_bytes=200 * 1024 * 1024):
+    request = urllib.request.Request(url, headers={"User-Agent": "CallVCF/1.0"})
+    digest = hashlib.sha256()
+    total = 0
+    with urllib.request.urlopen(request, timeout=90) as response, destination.open("wb") as handle:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise VCFError("工具下载超过 200 MB 安全限制")
+            digest.update(chunk)
+            handle.write(chunk)
+    return total, digest.hexdigest()
+
+
+def _safe_extract(archive, destination):
+    destination.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive) as handle:
+        for member in handle.infolist():
+            target = (destination / member.filename).resolve()
+            if destination.resolve() not in target.parents and target != destination.resolve():
+                raise VCFError("工具压缩包包含不安全路径")
+        handle.extractall(destination)
+
+
+def _metadata_path(name):
+    return tool_root() / name / "callvcf-tool.json"
+
+
+def _write_metadata(name, payload):
+    path = _metadata_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def resolve_plink(explicit=None):
+    if explicit and Path(str(explicit)).expanduser().is_file():
+        return str(Path(str(explicit)).expanduser().resolve())
+    filename = "plink.exe" if platform.system() == "Windows" else "plink"
+    installed = tool_root() / "plink" / filename
+    if installed.is_file():
+        return str(installed)
+    return shutil.which("plink")
+
+
+def resolve_ldblockshow(explicit=None):
+    if explicit and Path(str(explicit)).expanduser().is_file():
+        return str(Path(str(explicit)).expanduser().resolve())
+    installed = tool_root() / "ldblockshow" / "bin" / "LDBlockShow"
+    if installed.is_file():
+        return str(installed)
+    return shutil.which("LDBlockShow")
+
+
+def _probe(command, args):
+    if not command:
+        return None
+    try:
+        proc = subprocess.run([str(command)] + list(args), stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, timeout=8)
+        text = (proc.stdout + "\n" + proc.stderr).strip()
+        return text.splitlines()[0][:300] if text else "可执行文件已找到"
+    except Exception as exc:
+        return "已找到，但版本检测失败：{}".format(exc)
+
+
+def _wsl_operational():
+    executable = shutil.which("wsl.exe") or shutil.which("wsl")
+    if not executable:
+        return False
+    try:
+        proc = subprocess.run([str(executable), "-e", "sh", "-lc", "true"],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=12)
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def tools_status():
+    system = platform.system()
+    plink = resolve_plink()
+    ldblockshow = resolve_ldblockshow()
+    wsl_installed = _wsl_operational() if system == "Windows" else False
+    return {
+        "tool_root": str(tool_root()), "platform": system,
+        "plink": {"installed": bool(plink), "path": plink, "version": _probe(plink, ["--version"]),
+                  "bundled_version": PLINK_VERSION, "license": "GPL-3.0"},
+        "ldblockshow": {"installed": bool(ldblockshow), "path": ldblockshow,
+                        "version": "LDBlockShow (official hewm2008 build)" if ldblockshow else None,
+                        "license": "MIT", "requires_wsl": system == "Windows",
+                        "wsl_available": wsl_installed},
+    }
+
+
+def install_tool(name):
+    name = str(name or "").lower()
+    root = tool_root()
+    root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="callvcf-tool-") as temp_name:
+        temp = Path(temp_name)
+        archive = temp / "download.zip"
+        if name == "plink":
+            url = PLINK_URLS.get(platform.system())
+            if not url:
+                raise VCFError("当前平台暂不支持自动安装 PLINK，请手动选择可执行文件")
+            size, digest = _download(url, archive)
+            extracted = temp / "extracted"
+            _safe_extract(archive, extracted)
+            filename = "plink.exe" if platform.system() == "Windows" else "plink"
+            source = next((p for p in extracted.rglob(filename) if p.is_file()), None)
+            if not source:
+                raise VCFError("PLINK 官方压缩包中未找到 {}".format(filename))
+            destination = root / "plink"
+            destination.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination / filename)
+            for candidate in extracted.rglob("LICENSE*"):
+                if candidate.is_file():
+                    shutil.copy2(candidate, destination / candidate.name)
+            if platform.system() != "Windows":
+                (destination / filename).chmod((destination / filename).stat().st_mode | stat.S_IEXEC)
+            _write_metadata("plink", {"source": url, "version": PLINK_VERSION,
+                                      "sha256": digest, "download_bytes": size, "license": "GPL-3.0"})
+        elif name == "ldblockshow":
+            size, digest = _download(LDBLOCKSHOW_URL, archive)
+            extracted = temp / "extracted"
+            _safe_extract(archive, extracted)
+            source_root = next((p for p in extracted.iterdir() if p.is_dir()), None)
+            binary = next((p for p in extracted.rglob("LDBlockShow")
+                           if p.is_file() and p.parent.name == "bin"), None)
+            if not source_root or not binary:
+                raise VCFError("LDBlockShow 官方压缩包中未找到 bin/LDBlockShow")
+            destination = root / "ldblockshow"
+            if destination.exists():
+                shutil.rmtree(destination)
+            shutil.copytree(source_root, destination)
+            installed = destination / "bin" / "LDBlockShow"
+            installed.chmod(installed.stat().st_mode | stat.S_IEXEC)
+            _write_metadata("ldblockshow", {"source": LDBLOCKSHOW_URL, "version": "main",
+                                             "sha256": digest, "download_bytes": size, "license": "MIT"})
+        else:
+            raise VCFError("无法识别的工具：{}".format(name))
+    return tools_status()
