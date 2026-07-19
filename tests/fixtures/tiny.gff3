@@ -1,0 +1,6 @@
+##gff-version 3
+1	test	gene	50	250	.	+	.	ID=geneA;Name=GeneA
+1	test	mRNA	50	250	.	+	.	ID=txA;Parent=geneA
+1	test	exon	50	120	.	+	.	ID=exon1;Parent=txA
+1	test	CDS	80	110	.	+	0	ID=cds1;Parent=txA
+1	test	exon	180	250	.	+	.	ID=exon2;Parent=txA
