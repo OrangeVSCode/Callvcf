@@ -1,4 +1,4 @@
-const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null, qualityCatalog: null, qualityRun: null, qualityPoll: null, qcRecommendation: null, repairCatalog: null, repairPlan: null, repairPoll: null };
+const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null, qualityCatalog: null, qualityRun: null, qualityPoll: null, qcRecommendation: null, repairCatalog: null, repairPlan: null, repairPoll: null, repairCompleted: false };
 const $ = (id) => document.getElementById(id);
 const categoryOrder = ["HOM_REF", "HET", "HOM_ALT", "MISSING", "OTHER"];
 const shortLabels = { HOM_REF: "0/0", HET: "0/1", HOM_ALT: "1/1", MISSING: "缺失", OTHER: "其他" };
@@ -136,15 +136,21 @@ async function inspectVCF() {
   const button = $("inspectBtn");
   button.disabled = true; button.textContent = "识别中…";
   $("metadata").className = "metadata loading"; $("metadata").textContent = "";
+  state.metadata = null;
+  state.lastResult = null; state.lastLeadResult = null; state.lastProfileResult = null;
+  state.qualityRun = null; state.qcRecommendation = null; state.repairCompleted = false;
+  updateWorkflow();
   try {
     const meta = await api("/api/inspect", { path: currentPath() });
     state.metadata = meta;
     localStorage.setItem("vcfExplorerPath", meta.path);
     renderMetadata(meta);
+    updateWorkflow();
     toast(`已载入 ${meta.name}，${meta.sample_count} 个样本`);
   } catch (error) {
     $("metadata").className = "metadata empty-state";
     $("metadata").textContent = error.message;
+    updateWorkflow();
     toast(error.message, true);
   } finally {
     button.disabled = false; button.textContent = "载入并识别";
@@ -208,7 +214,9 @@ function renderExistence(data) {
     ? item.records.map((r, i) => `<tr><td>${escapeHtml(item.query)}</td><td class="yes">存在${item.records.length > 1 ? ` · 记录 ${i + 1}` : ""}</td><td>${escapeHtml(r.ref)}</td><td>${escapeHtml(r.alt)}</td><td><span class="variant-badge">${escapeHtml(r.variant_type)}${r.svtype ? ` · ${escapeHtml(r.svtype)}` : ""}</span></td><td>${escapeHtml(r.id || ".")}</td><td>${escapeHtml(r.end)}</td></tr>`)
     : [`<tr><td>${escapeHtml(item.query)}</td><td class="no">不存在</td><td colspan="5">—</td></tr>`]
   ).join("");
-  return `<div class="table-wrap"><table><thead><tr><th>查询位点</th><th>结果</th><th>REF</th><th>ALT</th><th>类型</th><th>ID</th><th>END</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  const found = data.results.filter(item => item.exists).map(item => item.query);
+  const handoff = found.length ? `<div class="handoff-bar"><strong>已找到 ${found.length} 个位点，继续：</strong><button class="secondary result-handoff" data-target="distribution">查看所有样本基因型</button><button class="secondary result-handoff" data-target="matrix">查看指定样本</button><button class="primary result-handoff" data-target="lead" data-locus="${escapeHtml(found[0])}">作为 Lead 分析</button></div>` : "";
+  return `${handoff}<div class="table-wrap"><table><thead><tr><th>查询位点</th><th>结果</th><th>REF</th><th>ALT</th><th>类型</th><th>ID</th><th>END</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function distributionCard(item) {
@@ -587,6 +595,7 @@ async function runLeadAnalysis() {
     setLoading(target, button, options.ldblockshow ? "正在计算 LD 并运行 LDBlockShow…" : "正在分析 Lead 位点…");
     const result = await api("/api/lead-analysis", payload);
     state.lastLeadResult = result;
+    updateWorkflow();
     clearLoading(target, button);
     target.innerHTML = renderLeadResult(result);
     toast("Lead 位点分析完成");
@@ -645,7 +654,7 @@ async function runSampleLeadProfile() {
     const payload = {path: currentPath(), samples: selectedSamples(true), lead_loci: $("profileLeadLoci").value.trim(), phenotype_path: $("profilePhenotypePath").value.trim(), significance_threshold: $("profilePThreshold").value, trait_directions: $("traitDirections").value};
     if (!payload.lead_loci) throw new Error("请输入 Lead-SNP 列表");
     setLoading(target, button, "正在联合 VCF 与 GWAS 结果生成样本画像…");
-    const result = await api("/api/sample-lead-profile", payload); state.lastProfileResult = result; saveAdvancedSettings();
+    const result = await api("/api/sample-lead-profile", payload); state.lastProfileResult = result; saveAdvancedSettings(); updateWorkflow();
     clearLoading(target, button); target.innerHTML = renderSampleLeadProfile(result); toast("样本 Lead-SNP 画像已生成");
   } catch (error) { clearLoading(target, button); target.className = "result-body empty-state"; target.textContent = error.message; toast(error.message, true); }
 }
@@ -678,6 +687,7 @@ async function runAction(action, button) {
     if (action === "distribution") target.innerHTML = renderDistribution(result);
     if (action === "matrix") target.innerHTML = renderMatrix(result);
     if (action === "stats") target.innerHTML = `<p class="sub">处理记录：${formatNumber(result.processed_records)}</p><div class="stats-grid">${result.results.map(statsCard).join("")}</div>`;
+    updateWorkflow();
     toast("查询完成");
   } catch (error) {
     clearLoading(target, button);
@@ -714,7 +724,78 @@ function applyQualityProfile() {
   $("qualitySubgenomes").value = profile.subgenomes || 1;
   $("qualityMating").value = profile.mating_system || "unknown";
   localStorage.setItem("callvcfQualityProfile", profile.id);
+  state.qualityRun = null;
   state.qcRecommendation = null;
+  state.repairCompleted = false;
+  updateWorkflow();
+}
+
+function activateTab(name, scroll = true) {
+  const tab = document.querySelector(`.tab[data-tab="${name}"]`);
+  if (!tab) return;
+  document.querySelectorAll(".tab").forEach(item => item.classList.toggle("active", item === tab));
+  document.querySelectorAll(".tab-pane").forEach(item => item.classList.toggle("active", item.id === `pane-${name}`));
+  state.activeTab = name;
+  if (scroll) document.querySelector(".results-panel")?.scrollIntoView({behavior:"smooth", block:"start"});
+}
+
+function setWorkflowCard(id, status, label) {
+  const card = $(id);
+  if (!card) return;
+  card.classList.remove("current", "complete", "attention");
+  if (status) card.classList.add(status);
+  card.querySelector("i").textContent = label;
+}
+
+function qualityWarningSamples(data) {
+  return [...new Set((data?.warnings || []).filter(item => item.scope === "sample" && ["critical","warning"].includes(item.level)).map(item => item.target).filter(Boolean))];
+}
+
+function updateWorkflow() {
+  if (!$("workflowSummary")) return;
+  const loaded = !!state.metadata;
+  const assessed = state.qualityRun?.status === "complete";
+  const explored = !!(state.lastResult || state.lastLeadResult || state.lastProfileResult);
+  const readiness = state.qualityRun?.result?.analysis_readiness;
+  setWorkflowCard("workflowLoad", loaded ? "complete" : "current", loaded ? "完成" : "当前");
+  setWorkflowCard("workflowAssess", assessed ? "complete" : loaded ? "current" : "", assessed ? "完成" : loaded ? "下一步" : "等待");
+  const needsQc = assessed && ["hold", "caution"].includes(readiness?.code);
+  setWorkflowCard("workflowQc", state.repairCompleted ? "complete" : needsQc ? "attention" : "", state.repairCompleted ? "已复评" : needsQc ? "建议核对" : "可选");
+  setWorkflowCard("workflowExplore", explored ? "complete" : assessed && !needsQc ? "current" : "", explored ? "已使用" : assessed && !needsQc ? "下一步" : "等待");
+  const actions = [];
+  if (!loaded) {
+    $("workflowSummary").textContent = "先在上方选择并载入 VCF；后续功能会自动沿用同一路径。";
+    actions.push(["回到文件选择", "primary", "source"]);
+  } else if (!assessed) {
+    $("workflowSummary").textContent = "文件已经载入。建议先评估质量，也可以直接查询已知位点。";
+    actions.push(["设置并运行质量评估", "primary", "quality"], ["直接检查位点", "secondary", "existence"]);
+  } else if (needsQc && !state.repairCompleted) {
+    $("workflowSummary").textContent = readiness.title || "报告提示先复核质量问题。";
+    actions.push(["查看智能质控建议", "primary", "quality-qc"], ["查看异常样本", "secondary", "quality-samples"], ["继续探索位点", "secondary", "existence"]);
+  } else {
+    $("workflowSummary").textContent = readiness?.title || "质量评估完成，可以进入位点、样本或 Lead 分析。";
+    actions.push(["检查位点", "primary", "existence"], ["样本统计", "secondary", "stats"], ["Lead高级分析", "secondary", "lead"]);
+  }
+  $("workflowActions").innerHTML = actions.map(([label, cls, target]) => `<button class="${cls}" data-workflow-target="${target}">${escapeHtml(label)}</button>`).join("");
+}
+
+function handleWorkflowTarget(target) {
+  if (target === "source") return document.querySelector(".source-panel")?.scrollIntoView({behavior:"smooth", block:"start"});
+  if (target === "quality-qc") {
+    activateTab("quality");
+    setTimeout(() => $("repairExecutorCard")?.scrollIntoView({behavior:"smooth", block:"center"}), 180);
+    return;
+  }
+  if (target === "quality-samples") {
+    const samples = qualityWarningSamples(state.qualityRun?.result);
+    if (!samples.length) return toast("当前报告没有需要带入的异常样本");
+    $("samplesInput").value = samples.join("\n");
+    renderSampleSuggestions("");
+    activateTab("stats");
+    toast(`已带入 ${samples.length} 个异常样本`);
+    return;
+  }
+  activateTab(target);
 }
 
 function qualityPayload() {
@@ -837,8 +918,26 @@ function renderQualityResult(job) {
     摘要: value.error || Object.entries(value.summary || {}).map(([k,v]) => `${k}=${v ?? "—"}`).join("；"),
     文件: (value.artifacts || []).join("、") || "—",
   }));
+  const readiness = data.analysis_readiness || {};
+  const warningSamples = qualityWarningSamples(data);
+  const priorityRows = (readiness.top_priorities || []).map((item, index) => ({
+    顺序: index + 1,
+    级别: `<span class="level-${escapeHtml(item.level)}">${escapeHtml(String(item.level || "info").toUpperCase())}</span>`,
+    对象: item.target || "—",
+    问题: item.message || "—",
+    证据: item.evidence || "—",
+    建议: item.advice || "—",
+  }));
+  const dimensionLabels = {
+    file_reference: "文件与参考一致性", sample_median: "样本中位质量", site: "位点质量",
+    population_integrity: "群体结构完整性", provenance: "流程可追溯性", requested_module_completion: "所选模块完成度",
+  };
+  const dimensionRows = Object.entries(readiness.score_dimensions || {}).map(([key, value]) => ({
+    维度: dimensionLabels[key] || key,
+    分数: value == null ? "NA（本次未运行）" : `${value}/100`,
+  }));
   target.className = "result-body";
-  target.innerHTML = `<div class="quality-summary">
+  target.innerHTML = `<div class="readiness-banner ${escapeHtml(readiness.code || "caution")}"><b>${escapeHtml(readiness.title || "质量评估已完成")}</b><span>${escapeHtml(readiness.description || "请结合完整报告解释结果。")}</span></div><div class="quality-summary">
     <div class="meta-card"><span>质量分</span><strong>${summary.score}/100</strong></div>
     <div class="meta-card"><span>记录数</span><strong>${formatNumber(summary.record_count)}</strong></div>
     <div class="meta-card"><span>评估位点</span><strong>${formatNumber(scan.evaluated_records)}</strong></div>
@@ -846,6 +945,8 @@ function renderQualityResult(job) {
     <div class="meta-card"><span>Warning</span><strong>${formatNumber(summary.warning_count)}</strong></div>
   </div>
   <div class="notice"><b>${escapeHtml(data.profile.name)}</b> · 生物学倍性 ${data.profile.ploidy} · GT编码倍性 ${data.profile.effective_gt_ploidy ?? "未识别"} · ${scan.mode === "full" ? "完整扫描" : `智能抽样 ${formatPercent(scan.sampling_fraction)}`} · ${escapeHtml(scan.method_note)}</div>
+  <div class="handoff-bar"><strong>下一步：</strong><button class="primary quality-handoff" data-target="quality-qc">核对智能质控参数</button>${warningSamples.length ? `<button class="secondary quality-handoff" data-target="quality-samples">带入 ${warningSamples.length} 个异常样本</button>` : ""}<button class="secondary quality-handoff" data-target="existence">检查关注位点</button><button class="secondary quality-handoff" data-target="lead">进入 Lead 高级分析</button></div>
+  <div class="quality-section"><h4>主分析前的优先事项</h4><p class="sub">按阻断性和证据强度排序；没有运行的群体模块显示为 NA，不会被错误计为 0 分。</p>${genericTable(priorityRows, ["顺序","级别","对象","问题","证据","建议"])}${genericTable(dimensionRows, ["维度","分数"])}</div>
   <div class="quality-section"><h4>HWE、PCA、亲缘关系、LD与ROH</h4><p class="sub">HWE按物种Profile解释；棉花/自交/多倍体只做描述。PCA/亲缘使用LD剪枝面板，LD衰减使用未剪枝QC面板；亲缘估计为PLINK 1.9 IBD/PI_HAT。</p>${genericTable(populationRows, ["模块","状态","解释口径","摘要","文件"])}</div>
   <div class="quality-section"><h4>报告下载</h4><div class="artifact-list">${artifactLinks}</div><small>HTML可离线交互和打印为PDF；ZIP包含HTML、JSON、TSV与运行审计文件。</small></div>
   <div class="quality-section"><h4>告警明细（页面最多显示200条，完整内容见 warnings.tsv）</h4>${genericTable(warnings, ["级别","范围","对象","问题","证据","建议"])}</div>
@@ -863,6 +964,7 @@ async function pollQuality(runId) {
       $("qualityRunBtn").textContent = "重新评估";
       $("qualityCancelBtn").classList.add("hidden");
       renderQualityResult(job);
+      updateWorkflow();
       if (job.status === "complete") toast("VCF质量报告已生成");
       return;
     }
@@ -999,6 +1101,8 @@ async function pollRepair(planId) {
     const comparisonHtml = comparison ? `<div class="quality-summary"><div class="meta-card"><span>质控前评分</span><strong>${comparison.before.score}/100</strong></div><div class="meta-card"><span>质控后评分</span><strong>${comparison.after.score}/100</strong></div><div class="meta-card"><span>评分变化</span><strong>${comparison.change.score_delta >= 0 ? "+" : ""}${comparison.change.score_delta}</strong></div><div class="meta-card"><span>移除位点</span><strong>${formatNumber(comparison.change.records_removed)} · ${formatPercent(comparison.change.records_removed_fraction)}</strong></div></div><p><b>告警变化：</b>解决 ${comparison.change.resolved_warning_count}；新增 ${comparison.change.new_warning_count}；仍存在 ${comparison.change.persistent_warning_count}。</p><ul>${(comparison.further_recommendations || []).map(x => `<li>${escapeHtml(x)}</li>`).join("")}</ul><p>比较报告：${escapeHtml(job.result.qc_comparison_report)}<br>质控后完整报告：${escapeHtml(job.result.qc_after_report)}</p>` : "";
     $("repairResult").innerHTML = `<b>${escapeHtml(job.message)}</b> · ${job.progress ?? 0}%${job.error ? `<br>${escapeHtml(job.error)}` : ""}${job.result ? `<br>输出：${escapeHtml(job.result.output_path || job.result.index_path)}<br>审计日志：${escapeHtml(job.result.audit_log)}${job.result.before_stats ? `<br>修复前后统计：${escapeHtml(job.result.before_stats)} · ${escapeHtml(job.result.after_stats)}<br>清单：${escapeHtml(job.result.manifest)}` : ""}${comparisonHtml}` : ""}`;
     if (["complete","failed","cancelled"].includes(job.status)) {
+      if (job.status === "complete" && comparison) state.repairCompleted = true;
+      updateWorkflow();
       $("repairPlanBtn").disabled = !state.repairCatalog?.available; $("repairCancelBtn").classList.add("hidden");
       toast(job.status === "complete" ? "安全修复已完成" : job.message, job.status !== "complete");
       return;
@@ -1011,6 +1115,13 @@ function initEvents() {
   $("selectFileBtn").addEventListener("click", selectLocalFile);
   $("shutdownBtn").addEventListener("click", shutdownLocal);
   $("inspectBtn").addEventListener("click", inspectVCF);
+  $("vcfPath").addEventListener("input", () => {
+    if (!state.metadata || $("vcfPath").value.trim() === state.metadata.path) return;
+    state.metadata = null;
+    state.lastResult = null; state.lastLeadResult = null; state.lastProfileResult = null;
+    state.qualityRun = null; state.qcRecommendation = null; state.repairCompleted = false;
+    updateWorkflow();
+  });
   $("discoverBtn").addEventListener("click", discoverFiles);
   $("fileSelect").addEventListener("change", e => { $("vcfPath").value = e.target.value; });
   $("sampleSearch").addEventListener("input", e => renderSampleSuggestions(e.target.value));
@@ -1056,11 +1167,10 @@ function initEvents() {
     if (pdfButton) { try { exportLdPdf(pdfButton.dataset.metric); } catch (err) { toast(err.message, true); } }
   });
   $("sampleLeadResult").addEventListener("click", e => { if (e.target.closest("#downloadProfileBtn")) downloadProfile(); });
-  document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x === tab));
-    document.querySelectorAll(".tab-pane").forEach(x => x.classList.toggle("active", x.id === `pane-${tab.dataset.tab}`));
-    state.activeTab = tab.dataset.tab;
-  }));
+  document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => activateTab(tab.dataset.tab, false)));
+  $("workflowPanel").addEventListener("click", event => { const button = event.target.closest("[data-workflow-target],[data-go-tab]"); if (button) handleWorkflowTarget(button.dataset.workflowTarget || button.dataset.goTab); });
+  $("qualityResult").addEventListener("click", event => { const button = event.target.closest(".quality-handoff"); if (button) handleWorkflowTarget(button.dataset.target); });
+  $("existenceResult").addEventListener("click", event => { const button = event.target.closest(".result-handoff"); if (!button) return; if (button.dataset.locus) $("leadLocus").value = button.dataset.locus; activateTab(button.dataset.target); });
   document.querySelectorAll(".run-btn").forEach(btn => btn.addEventListener("click", () => runAction(btn.dataset.action, btn)));
 }
 
@@ -1074,6 +1184,7 @@ document.addEventListener("DOMContentLoaded", () => {
   loadRepairCatalog();
   updateRepairFields();
   updateQcMode();
+  updateWorkflow();
   $("ldMode").dispatchEvent(new Event("change"));
   checkHealth();
 });

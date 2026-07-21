@@ -51,6 +51,24 @@
       <div id="metadata" class="metadata empty-state">尚未载入 VCF。</div>
     </section>
 
+    <section class="panel workflow-panel" id="workflowPanel">
+      <div class="section-heading compact">
+        <div><span class="step">→</span><h2>分析工作流</h2></div>
+        <p id="workflowSummary">先载入 VCF；软件会根据当前进度推荐下一步，并保留自由跳转。</p>
+      </div>
+      <div class="workflow-track">
+        <article class="workflow-card" id="workflowLoad"><span class="workflow-index">1</span><div><b>载入与识别</b><small>格式、样本、类型、索引与查询方式</small></div><i>等待</i></article>
+        <article class="workflow-card" id="workflowAssess"><span class="workflow-index">2</span><div><b>质量评估</b><small>物种 Profile、样本/位点及群体证据</small></div><i>等待</i></article>
+        <article class="workflow-card" id="workflowQc"><span class="workflow-index">3</span><div><b>质控与复评</b><small>保守默认或自定义；始终生成新副本</small></div><i>可选</i></article>
+        <article class="workflow-card" id="workflowExplore"><span class="workflow-index">4</span><div><b>查询与关联解释</b><small>位点、样本、Lead、LD、表型和注释</small></div><i>等待</i></article>
+      </div>
+      <div class="workflow-actions" id="workflowActions">
+        <button class="primary" data-go-tab="quality">设置并运行质量评估</button>
+        <button class="secondary" data-go-tab="existence">直接检查位点</button>
+        <button class="secondary" data-go-tab="lead">进入 Lead 高级分析</button>
+      </div>
+    </section>
+
     <section class="panel query-panel">
       <div class="section-heading">
         <div><span class="step">02</span><h2>输入查询条件</h2></div>

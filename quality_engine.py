@@ -119,6 +119,80 @@ def _warning(level, scope, target, code, message, evidence=None, advice=None):
     }
 
 
+def build_analysis_readiness(result):
+    """Summarize whether the VCF is ready for downstream work and where the user should drill down next."""
+    warnings = list(result.get("warnings") or [])
+    summary = result.get("summary") or {}
+    hard_codes = {
+        "HEADER_REQUIRED", "UNSORTED", "MALFORMED", "CONTIG_LENGTH_MISMATCH", "REF_MISMATCH",
+    }
+    hard_blockers = [item for item in warnings if item.get("level") == "critical" and item.get("code") in hard_codes]
+    critical = [item for item in warnings if item.get("level") == "critical"]
+    score = int(summary.get("score") or 0)
+    if hard_blockers or score < 60:
+        code, title = "hold", "暂停下游分析，先处理关键问题"
+        description = "检测到结构、参考一致性或其他高风险证据；修复或复核后应重新评估。"
+    elif critical or score < 80:
+        code, title = "caution", "可继续探索，但主分析前建议复核"
+        description = "当前文件可用于定位问题和试算；正式关联分析前建议处理首页优先事项。"
+    else:
+        code, title = "ready", "质量证据支持继续下游分析"
+        description = "未发现阻断性问题；仍建议保留报告、参数和原始VCF以保证可追溯。"
+
+    anchor_by_scope = {
+        "file": "section-input", "reference": "section-input", "metadata": "section-input",
+        "site": "section-site", "region": "section-site", "annotation": "section-annotation",
+        "sample": "section-samples", "sample_pair": "section-population", "cohort": "section-population",
+        "batch": "section-population",
+    }
+    priorities = []
+    for item in sorted(warnings, key=lambda row: (-_level_rank(row.get("level")), row.get("scope", ""), row.get("target", ""))):
+        if item.get("level") not in {"critical", "warning"}:
+            continue
+        priorities.append({
+            "level": item.get("level"), "code": item.get("code"), "scope": item.get("scope"),
+            "target": item.get("target"), "message": item.get("message"), "evidence": item.get("evidence"),
+            "advice": item.get("advice"), "anchor": anchor_by_scope.get(item.get("scope"), "section-warnings"),
+        })
+        if len(priorities) >= 5:
+            break
+
+    scope_counts = Counter((item.get("scope"), item.get("level")) for item in warnings)
+    samples = result.get("samples") or []
+    sample_score = _median([item.get("sample_score") for item in samples])
+    file_reference_score = max(0, 100 - 18 * sum(scope_counts[(scope, "critical")] for scope in ("file", "reference")) - 6 * sum(scope_counts[(scope, "warning")] for scope in ("file", "reference")))
+    site_score = max(0, 100 - 10 * scope_counts[("site", "critical")] - 3 * scope_counts[("site", "warning")])
+    population_score = max(0, 100 - 15 * scope_counts[("sample_pair", "critical")] - 5 * scope_counts[("sample_pair", "warning")] - 3 * scope_counts[("cohort", "warning")])
+    modules = (result.get("population_analysis") or {}).get("modules") or {}
+    requested_modules = [module for module in modules.values() if module.get("enabled")]
+    module_score = round(100 * sum(module.get("status") == "complete" for module in requested_modules) / len(requested_modules)) if requested_modules else None
+    dimensions = {
+        "file_reference": file_reference_score,
+        "sample_median": round(sample_score) if sample_score is not None else None,
+        "site": site_score,
+        "population_integrity": population_score if requested_modules else None,
+        "provenance": (result.get("header_audit") or {}).get("qc_evidence_score"),
+        "requested_module_completion": module_score,
+    }
+
+    next_steps = []
+    if hard_blockers:
+        next_steps.append({"label": "核对输入与参考", "tab": "quality", "anchor": "section-input"})
+    if any(item.get("scope") == "sample" and item.get("level") in {"critical", "warning"} for item in warnings):
+        next_steps.append({"label": "查看异常样本", "tab": "stats", "anchor": "section-samples"})
+    if any(item.get("scope") in {"sample_pair", "cohort", "batch"} and item.get("level") in {"critical", "warning"} for item in warnings):
+        next_steps.append({"label": "查看群体与亲缘证据", "tab": "quality", "anchor": "section-population"})
+    if result.get("qc_recommendation"):
+        next_steps.append({"label": "核对智能质控参数", "tab": "quality", "anchor": "section-recommendations"})
+    if code == "ready":
+        next_steps.append({"label": "进入位点或Lead分析", "tab": "existence", "anchor": "section-overview"})
+    return {
+        "code": code, "title": title, "description": description, "score": score,
+        "hard_blocker_count": len(hard_blockers), "top_priorities": priorities,
+        "score_dimensions": dimensions, "next_steps": next_steps[:4],
+    }
+
+
 def build_qc_recommendation(result):
     """Build a conservative, auditable QC preset from the selected profile and observed VCF fields."""
     profile = result.get("profile") or {}
@@ -1128,6 +1202,7 @@ class QualityEvaluator:
             },
         }
         result["qc_recommendation"] = build_qc_recommendation(result)
+        result["analysis_readiness"] = build_analysis_readiness(result)
         if progress:
             progress(total_records, 100.0, "质量评估完成，正在生成报告")
         return result
@@ -1275,14 +1350,15 @@ def render_report(result):
     warnings = result["warnings"]
     sample_rows = []
     for item in result["samples"]:
-        sample_rows.append("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+        sample_rows.append("<tr data-sample='{}' data-status='{}'><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+            html.escape(item["sample_id"].lower()), html.escape(item.get("sample_status") or "pass"),
             html.escape(item["sample_id"]), html.escape(item.get("group") or "—"), html.escape(item.get("batch") or "—"), _fmt(item.get("sample_score")), html.escape(item.get("sample_status") or "—"), _ratio(item["missing_rate"]), _ratio(item["het_rate"]),
             _fmt(item["median_dp"]), _fmt(item["median_gq"]), _ratio(item["ab_outlier_rate"]),
             _ratio(item.get("phase_rate"))))
     warning_rows = []
     for item in warnings:
-        warning_rows.append("<tr><td><span class='badge {}'>{}</span></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
-            item["level"], item["level"].upper(), html.escape(item["scope"]), html.escape(str(item["target"])),
+        warning_rows.append("<tr data-level='{}'><td><span class='badge {}'>{}</span></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+            item["level"], item["level"], item["level"].upper(), html.escape(item["scope"]), html.escape(str(item["target"])),
             html.escape(item["message"]), html.escape(item["advice"])))
     threshold_rows = []
     for key, value in profile["thresholds"].items():
@@ -1303,7 +1379,7 @@ def render_report(result):
         modules = population.get("modules") or {}
         pca_chart = _svg_pca((modules.get("pca") or {}).get("preview") or [])
         ld_chart = _svg_ld_decay((modules.get("ld") or {}).get("preview") or [])
-        population_section = "<section class='card'><h2>群体遗传分析</h2><p class='note'>模块使用QC过滤后的二等位面板；PCA/亲缘使用LD剪枝标记，LD衰减使用未剪枝的均匀限量标记，避免人为压低r²。HWE是否参与质量解释由Profile决定，其余默认作为探索性证据。</p><div class='table'><table><thead><tr><th>模块</th><th>状态</th><th>摘要</th><th>结果文件</th></tr></thead><tbody>{}</tbody></table></div></section><div class='grid'><section class='card'><h2>PCA：PC1 × PC2</h2>{}</section><section class='card'><h2>LD衰减（平均r²）</h2>{}</section></div>".format("".join(population_rows) or "<tr><td colspan='4'>未启用</td></tr>", pca_chart, ld_chart)
+        population_section = "<section class='card' id='section-population'><h2>群体遗传分析</h2><p class='note'>模块使用QC过滤后的二等位面板；PCA/亲缘使用LD剪枝标记，LD衰减使用未剪枝的均匀限量标记，避免人为压低r²。HWE是否参与质量解释由Profile决定，其余默认作为探索性证据。</p><div class='table'><table><thead><tr><th>模块</th><th>状态</th><th>摘要</th><th>结果文件</th></tr></thead><tbody>{}</tbody></table></div></section><div class='grid'><section class='card'><h2>PCA：PC1 × PC2</h2>{}</section><section class='card'><h2>LD衰减（平均r²）</h2>{}</section></div>".format("".join(population_rows) or "<tr><td colspan='4'>未启用</td></tr>", pca_chart, ld_chart)
     metric_rows = []
     for key, item in (site.get("quality_field_summaries") or {}).items():
         metric_rows.append("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
@@ -1326,26 +1402,53 @@ def render_report(result):
     qc_recommendation = result.get("qc_recommendation") or {}
     qc_parameter_rows = ["<tr><td>{}</td><td>{}</td></tr>".format(html.escape(str(key)), html.escape(str(value if value is not None else "关闭"))) for key, value in (qc_recommendation.get("parameters") or {}).items()]
     qc_reason_rows = "".join("<li>{}</li>".format(html.escape(str(item))) for item in qc_recommendation.get("reasons", []))
+    readiness = result.get("analysis_readiness") or build_analysis_readiness(result)
+    priority_rows = "".join(
+        "<article class='priority {}'><div><span>{}</span><b>{}</b><small>{} · {}</small></div><a href='#{}'>查看证据</a></article>".format(
+            html.escape(item.get("level") or "warning"), html.escape((item.get("level") or "warning").upper()),
+            html.escape(item.get("message") or ""), html.escape(item.get("scope") or ""), html.escape(str(item.get("target") or "")),
+            html.escape(item.get("anchor") or "section-warnings"),
+        ) for item in readiness.get("top_priorities", [])
+    ) or "<p class='empty'>没有需要优先处理的关键告警。</p>"
+    dimension_rows = "".join(
+        "<div class='dimension'><span>{}</span><b>{}</b></div>".format(html.escape(label), "NA" if value is None else "{}/100".format(value))
+        for key, label in (("file_reference", "文件与参考"), ("sample_median", "样本中位"), ("site", "位点质量"), ("population_integrity", "群体完整性"), ("provenance", "来源证据"), ("requested_module_completion", "所选模块完成度"))
+        for value in [readiness.get("score_dimensions", {}).get(key)]
+    )
+    download_names = [
+        ("report_summary.json", "JSON摘要"), ("sample_metrics.tsv", "样本指标"),
+        ("variant_metrics.tsv", "位点指标"), ("warnings.tsv", "告警表"),
+        ("recommend_filters.tsv", "推荐过滤"),
+    ]
+    population_artifacts = set((result.get("population_analysis") or {}).get("artifacts") or [])
+    for filename, label in (("pairwise_similarity.tsv", "样本对相似度"), ("roh_segments.tsv", "ROH区段"), ("pca_scores.tsv", "PCA坐标"), ("ld_decay.tsv", "LD衰减")):
+        if filename in population_artifacts:
+            download_names.append((filename, label))
+    download_names.append(("CallVCF_QC_report.zip", "完整报告包"))
+    download_links = "".join("<a href='{}'>{}</a>".format(html.escape(filename), html.escape(label)) for filename, label in download_names)
     embedded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
     template = """<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>CallVCF质量评估报告</title><style>
-    :root{--ink:#18342b;--muted:#667a72;--line:#d8e2dd;--brand:#2f725f;--soft:#f2f7f4;--warn:#a96200;--crit:#a62d33}*{box-sizing:border-box}body{margin:0;background:#edf3ef;color:var(--ink);font-family:"Microsoft YaHei",Arial,sans-serif}main{max-width:1180px;margin:auto;padding:30px}.hero,.card{background:white;border:1px solid var(--line);border-radius:18px;padding:24px;margin-bottom:18px}.hero{background:linear-gradient(135deg,#173c31,#347966);color:white}.hero h1{font-size:34px;margin:5px 0}.hero p{opacity:.82}.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}.kpi{background:var(--soft);border-radius:14px;padding:16px}.kpi b{display:block;font-size:25px;margin-top:6px}.score{font-size:64px;font-weight:800}.status-pass{color:#d6ffe8}.status-warning{color:#ffe09c}.status-critical{color:#ffb1b4}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}h2{font-size:21px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;padding:9px;border-bottom:1px solid #e8eeeb}th{position:sticky;top:0;background:#f6faf8}.table{max-height:520px;overflow:auto;border:1px solid var(--line);border-radius:10px}.badge{padding:3px 7px;border-radius:10px;font-weight:700}.badge.info{background:#e8eef3}.badge.warning{background:#fff0cc;color:#805000}.badge.critical{background:#ffe0e1;color:#98242b}.note{padding:12px;background:#fff7df;border-left:4px solid #d18b00}.actions{display:flex;gap:8px;flex-wrap:wrap}.actions button{border:0;border-radius:9px;padding:10px 14px;background:#e8f1ed;color:var(--ink);cursor:pointer}.actions button:first-child{background:white}.empty{padding:30px;color:var(--muted)}svg{width:100%;height:auto}@media(max-width:800px){.kpis,.grid{grid-template-columns:1fr 1fr}}@media print{body{background:white}main{max-width:none;padding:0}.actions{display:none}.card,.hero{break-inside:avoid;border-color:#bbb}.table{max-height:none;overflow:visible}}
-    </style></head><body><main><section class='hero'><div class='actions'><button onclick='window.print()'>打印/另存为PDF</button><button onclick='downloadJson()'>下载嵌入JSON</button></div><p>CallVCF · VCF DEEP QUALITY REPORT</p><h1>VCF质量评估报告</h1><div class='score status-{status}'>{score} <small style='font-size:22px'>/ 100 · {status_label}</small></div><p>{name} · {generated}</p></section>
+    :root{--ink:#18342b;--muted:#667a72;--line:#d8e2dd;--brand:#2f725f;--soft:#f2f7f4;--warn:#a96200;--crit:#a62d33}*{box-sizing:border-box;scroll-behavior:smooth}body{margin:0;background:#edf3ef;color:var(--ink);font-family:"Microsoft YaHei",Arial,sans-serif}main{max-width:1180px;margin:auto;padding:30px}.hero,.card{background:white;border:1px solid var(--line);border-radius:18px;padding:24px;margin-bottom:18px}.hero{background:linear-gradient(135deg,#173c31,#347966);color:white}.hero h1{font-size:34px;margin:5px 0}.hero p{opacity:.82}.report-nav{position:sticky;top:0;z-index:20;display:flex;gap:6px;overflow:auto;margin:0 0 18px;padding:8px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.94);box-shadow:0 8px 26px rgba(24,52,43,.08)}.report-nav a{padding:8px 11px;border-radius:9px;color:var(--brand);font-size:12px;font-weight:700;text-decoration:none;white-space:nowrap}.report-nav a:hover{background:var(--soft)}.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}.kpi{background:var(--soft);border-radius:14px;padding:16px}.kpi b{display:block;font-size:25px;margin-top:6px}.score{font-size:64px;font-weight:800}.status-pass{color:#d6ffe8}.status-warning{color:#ffe09c}.status-critical{color:#ffb1b4}.readiness{border-left:6px solid var(--brand)}.readiness.caution{border-left-color:var(--warn)}.readiness.hold{border-left-color:var(--crit)}.readiness h2{margin-bottom:5px}.priority-list{display:grid;gap:8px;margin:14px 0}.priority{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;border:1px solid var(--line);border-radius:11px;background:#fafcfb}.priority div{display:grid;grid-template-columns:auto 1fr;gap:3px 9px}.priority span{grid-row:1/3;padding:3px 6px;border-radius:7px;background:#fff0cc;color:#805000;font-size:10px;font-weight:800}.priority.critical span{background:#ffe0e1;color:#98242b}.priority small{color:var(--muted)}.priority a{color:var(--brand);font-size:12px;font-weight:700;white-space:nowrap}.dimensions{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}.dimension{padding:10px;border-radius:10px;background:var(--soft)}.dimension span,.dimension b{display:block}.dimension span{color:var(--muted);font-size:10px}.dimension b{margin-top:4px;font-size:15px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}h2{font-size:21px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;padding:9px;border-bottom:1px solid #e8eeeb}th{position:sticky;top:0;background:#f6faf8}.table{max-height:520px;overflow:auto;border:1px solid var(--line);border-radius:10px}.badge{padding:3px 7px;border-radius:10px;font-weight:700}.badge.info{background:#e8eef3}.badge.warning{background:#fff0cc;color:#805000}.badge.critical{background:#ffe0e1;color:#98242b}.note{padding:12px;background:#fff7df;border-left:4px solid #d18b00}.filterbar{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.filterbar button,.filterbar input{min-height:36px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:white;color:var(--ink)}.filterbar button{cursor:pointer}.filterbar input{min-width:260px}.actions{display:flex;gap:8px;flex-wrap:wrap}.actions button{border:0;border-radius:9px;padding:10px 14px;background:#e8f1ed;color:var(--ink);cursor:pointer}.actions button:first-child{background:white}.download-grid{display:flex;gap:8px;flex-wrap:wrap}.download-grid a{padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--soft);color:var(--brand);font-size:12px;font-weight:700;text-decoration:none}.empty{padding:30px;color:var(--muted)}svg{width:100%;height:auto}@media(max-width:800px){.kpis,.grid{grid-template-columns:1fr 1fr}.dimensions{grid-template-columns:repeat(3,1fr)}}@media print{body{background:white}main{max-width:none;padding:0}.actions,.report-nav,.filterbar{display:none}.card,.hero{break-inside:avoid;border-color:#bbb}.table{max-height:none;overflow:visible}}
+    </style></head><body><main><section class='hero' id='section-overview'><div class='actions'><button onclick='window.print()'>打印/另存为PDF</button><button onclick='downloadJson()'>下载嵌入JSON</button></div><p>CallVCF · VCF DEEP QUALITY REPORT</p><h1>VCF质量评估报告</h1><div class='score status-{status}'>{score} <small style='font-size:22px'>/ 100 · {status_label}</small></div><p>{name} · {generated}</p></section>
+    <nav class='report-nav' aria-label='报告章节'><a href='#section-overview'>总览</a><a href='#section-input'>输入审计</a><a href='#section-site'>位点质量</a><a href='#section-samples'>样本质量</a><a href='#section-population'>群体与亲缘</a><a href='#section-warnings'>告警</a><a href='#section-recommendations'>质控建议</a><a href='#section-downloads'>下载</a></nav>
     <section class='kpis'><div class='kpi'>记录数<b>{records}</b></div><div class='kpi'>样本数<b>{samples}</b></div><div class='kpi'>染色体/Contig<b>{contigs}</b></div><div class='kpi'>严重告警<b>{critical}</b></div><div class='kpi'>一般告警<b>{warning}</b></div></section>
-    <section class='card'><h2>运行口径</h2><p><b>Profile：</b>{profile_name}；<b>物种：</b>{species}；<b>生物学倍性：</b>{ploidy}；<b>VCF GT编码倍性：</b>{gt_ploidy}；<b>亚基因组：</b>{subgenomes}</p><p><b>扫描：</b>{scan_mode}，评估 {evaluated}/{records} 条记录，耗时 {elapsed} 秒。</p><p class='note'>{method_note}</p></section>
-    <div class='grid'><section class='card'><h2>变异类型</h2>{type_chart}</section><section class='card'><h2>位点缺失率分布</h2>{missing_chart}</section></div>
+    <section class='card readiness {readiness_code}'><h2>{readiness_title}</h2><p>{readiness_description}</p><div class='priority-list'>{priority_rows}</div><h3>分层评分</h3><div class='dimensions'>{dimension_rows}</div></section>
+    <section class='card' id='section-input'><h2>运行口径与输入审计</h2><p><b>Profile：</b>{profile_name}；<b>物种：</b>{species}；<b>生物学倍性：</b>{ploidy}；<b>VCF GT编码倍性：</b>{gt_ploidy}；<b>亚基因组：</b>{subgenomes}</p><p><b>扫描：</b>{scan_mode}，评估 {evaluated}/{records} 条记录，耗时 {elapsed} 秒。</p><p class='note'>{method_note}</p></section>
+    <div class='grid' id='section-site'><section class='card'><h2>变异类型</h2>{type_chart}</section><section class='card'><h2>位点缺失率分布</h2>{missing_chart}</section></div>
     <div class='grid'><section class='card'><h2>MAF分布</h2>{maf_chart}</section><section class='card'><h2>SV长度分布</h2>{sv_chart}</section></div>
     <section class='card'><h2>位点质量字段分布</h2><p>覆盖率表示抽样位点中该字段存在的比例；缺字段显示为NA，不按0分处理。</p><div class='table'><table><thead><tr><th>字段</th><th>覆盖率</th><th>P05</th><th>中位数</th><th>P95</th><th>最大值</th></tr></thead><tbody>{metric_rows}</tbody></table></div><p>Header质控证据分：<b>{evidence_score}/100</b>；可继续最简化INDEL：{nonminimal}；相邻重复记录：{duplicates}。</p></section>
     <section class='card'><h2>模块可用性</h2><p class='note'>需要外部输入的模块不会伪造结果，也不会因为用户未提供文件而扣质量分。</p><div class='table'><table><thead><tr><th>模块</th><th>状态</th><th>原因/所需输入</th></tr></thead><tbody>{availability_rows}</tbody></table></div></section>
-    <div class='grid'><section class='card'><h2>样本缺失率 × 杂合率</h2>{sample_qc_chart}</section><section class='card'><h2>参考、区域与注释审计</h2><p><b>REF核验：</b>{reference_status}；检查 {reference_checked} 条，错配 {reference_mismatch} 条。</p><p><b>区域BED：</b>{region_status}；重叠记录 {region_overlap}（{region_rate}）。</p><p><b>功能注释：</b>{annotation_tags}。</p></section></div>
+    <div class='grid' id='section-samples'><section class='card'><h2>样本缺失率 × 杂合率</h2>{sample_qc_chart}</section><section class='card' id='section-annotation'><h2>参考、区域与注释审计</h2><p><b>REF核验：</b>{reference_status}；检查 {reference_checked} 条，错配 {reference_mismatch} 条。</p><p><b>区域BED：</b>{region_status}；重叠记录 {region_overlap}（{region_rate}）。</p><p><b>功能注释：</b>{annotation_tags}。</p></section></div>
     <section class='card'><h2>分组与批次质量</h2><div class='table'><table><thead><tr><th>维度</th><th>标签</th><th>样本数</th><th>中位缺失率</th><th>中位杂合率</th><th>中位DP</th><th>中位GQ</th></tr></thead><tbody>{group_rows}</tbody></table></div></section>
     <div class='grid'><section class='card'><h2>亚基因组概览</h2><div class='table'><table><thead><tr><th>亚基因组</th><th>评估位点</th><th>有效GT</th><th>杂合率</th></tr></thead><tbody>{subgenome_rows}</tbody></table></div></section><section class='card'><h2>假杂合候选窗口（前30）</h2><div class='table'><table><thead><tr><th>窗口</th><th>杂合率</th><th>0.25/0.75 AB比例</th><th>平均DP</th><th>候选</th></tr></thead><tbody>{fake_window_rows}</tbody></table></div></section></div>
-    <section class='card'><h2>告警与建议</h2><div class='table'><table><thead><tr><th>级别</th><th>范围</th><th>对象</th><th>问题</th><th>建议</th></tr></thead><tbody>{warning_rows}</tbody></table></div></section>
-    <section class='card'><h2>物种与VCF自适应质控建议</h2><p class='note'>这是保守起始方案，不会自动覆盖原VCF。预计触发位点过滤：{qc_estimated_removal}；高缺失候选样本：{qc_candidate_samples} 个，默认不自动删除。</p><div class='grid'><div class='table'><table><thead><tr><th>参数</th><th>推荐值</th></tr></thead><tbody>{qc_parameter_rows}</tbody></table></div><div><ul>{qc_reason_rows}</ul></div></div></section>
-    <section class='card'><h2>样本质量指标</h2><div class='table'><table><thead><tr><th>样本</th><th>Group</th><th>Batch</th><th>样本分</th><th>状态</th><th>缺失率</th><th>杂合率</th><th>中位DP</th><th>中位GQ</th><th>AB异常</th><th>相位率</th></tr></thead><tbody>{sample_rows}</tbody></table></div></section>
+    <section class='card' id='section-warnings'><h2>告警与建议</h2><div class='filterbar'><button onclick="filterWarnings('all')">全部</button><button onclick="filterWarnings('critical')">仅关键</button><button onclick="filterWarnings('warning')">仅提醒</button><button onclick="filterWarnings('info')">仅信息</button></div><div class='table'><table><thead><tr><th>级别</th><th>范围</th><th>对象</th><th>问题</th><th>建议</th></tr></thead><tbody id='warningTableBody'>{warning_rows}</tbody></table></div></section>
+    <section class='card' id='section-recommendations'><h2>物种与VCF自适应质控建议</h2><p class='note'>这是保守起始方案，不会自动覆盖原VCF。预计触发位点过滤：{qc_estimated_removal}；高缺失候选样本：{qc_candidate_samples} 个，默认不自动删除。</p><div class='grid'><div class='table'><table><thead><tr><th>参数</th><th>推荐值</th></tr></thead><tbody>{qc_parameter_rows}</tbody></table></div><div><ul>{qc_reason_rows}</ul></div></div></section>
+    <section class='card'><h2>样本质量指标</h2><div class='filterbar'><input id='sampleFilter' type='search' placeholder='搜索样本ID' oninput='filterSamples(this.value)'><button onclick="setSampleStatus('all')">全部状态</button><button onclick="setSampleStatus('critical')">关键</button><button onclick="setSampleStatus('warning')">提醒</button></div><div class='table'><table><thead><tr><th>样本</th><th>Group</th><th>Batch</th><th>样本分</th><th>状态</th><th>缺失率</th><th>杂合率</th><th>中位DP</th><th>中位GQ</th><th>AB异常</th><th>相位率</th></tr></thead><tbody id='sampleTableBody'>{sample_rows}</tbody></table></div></section>
     <section class='card'><h2>有效阈值与来源</h2><div class='table'><table><thead><tr><th>阈值</th><th>有效值</th><th>来源</th></tr></thead><tbody>{threshold_rows}</tbody></table></div></section>
     {population_section}
     <section class='card'><h2>自动修复安全策略</h2><p>原始VCF永不被静默覆盖。覆盖源文件、改写REF/ALT/GT、坐标转换、染色体批量重命名和删除文件均被定义为危险操作，执行前必须再次确认。</p></section>
-    <script type='application/json' id='reportData'>{embedded}</script><script>function downloadJson(){const text=document.getElementById('reportData').textContent;const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'application/json;charset=utf-8'}));a.download='report_summary.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}</script></main></body></html>"""
+    <section class='card' id='section-downloads'><h2>机器可读结果与复核材料</h2><p>下列文件与HTML使用同一数据内核，可直接用于R、Excel或后续脚本。</p><div class='download-grid'>{download_links}</div></section>
+    <script type='application/json' id='reportData'>{embedded}</script><script>let sampleStatus='all';function downloadJson(){const text=document.getElementById('reportData').textContent;const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'application/json;charset=utf-8'}));a.download='report_summary.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}function filterWarnings(level){document.querySelectorAll('#warningTableBody tr').forEach(row=>row.hidden=level!=='all'&&row.dataset.level!==level)}function setSampleStatus(status){sampleStatus=status;filterSamples(document.getElementById('sampleFilter').value)}function filterSamples(value){const query=(value||'').trim().toLowerCase();document.querySelectorAll('#sampleTableBody tr').forEach(row=>row.hidden=(sampleStatus!=='all'&&row.dataset.status!==sampleStatus)||(query&&!row.dataset.sample.includes(query)))}</script></main></body></html>"""
     values = {
         "status": summary["status"], "score": summary["score"], "status_label": status_label,
         "name": html.escape(result["input"]["name"]), "generated": html.escape(result["generated_at"]),
@@ -1379,6 +1482,9 @@ def render_report(result):
         "qc_candidate_samples": len(qc_recommendation.get("sample_exclusion_candidates") or []),
         "qc_parameter_rows": "".join(qc_parameter_rows) or "<tr><td colspan='2'>无可用参数</td></tr>", "qc_reason_rows": qc_reason_rows,
         "threshold_rows": "".join(threshold_rows), "population_section": population_section, "embedded": embedded,
+        "readiness_code": html.escape(readiness.get("code") or "caution"), "readiness_title": html.escape(readiness.get("title") or "需要复核"),
+        "readiness_description": html.escape(readiness.get("description") or ""), "priority_rows": priority_rows, "dimension_rows": dimension_rows,
+        "download_links": download_links,
     }
     for key, value in values.items():
         template = template.replace("{" + key + "}", str(value))
@@ -1479,6 +1585,8 @@ class QualityJobManager:
             subgenome_path = run_dir / "subgenome_metrics.tsv"
             fake_het_path = run_dir / "fake_heterozygosity_windows.tsv"
             consequences_path = run_dir / "annotation_consequences.tsv"
+            priorities_path = run_dir / "analysis_priorities.tsv"
+            score_dimensions_path = run_dir / "score_dimensions.tsv"
             report_path.write_text(render_report(result), encoding="utf-8")
             json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
             with samples_path.open("w", encoding="utf-8-sig", newline="") as handle:
@@ -1507,22 +1615,31 @@ class QualityJobManager:
             _write_rows(density_path, result["site_metrics"].get("density_windows", []), ["chrom", "start", "end", "variant_count"])
             _write_rows(modules_path, result.get("module_availability", []), ["module", "status", "reason"])
             thresholds = result["profile"]["thresholds"]
+            qc_recommendation = result.get("qc_recommendation") or {}
+            qc_parameters = qc_recommendation.get("parameters") or {}
+            estimated_removed = qc_recommendation.get("estimated_site_removal_fraction")
             recommended = [
-                {"scope": "site", "rule": "F_MISSING", "threshold": "<{}".format(thresholds["site_missing_warn"]), "reason": "Profile位点缺失提醒线", "execution": "建议生成新副本并比较前后指标"},
-                {"scope": "sample", "rule": "missing_rate", "threshold": "<{}".format(thresholds["sample_missing_warn"]), "reason": "Profile样本缺失提醒线", "execution": "先复核批次和深度，不自动删除"},
-                {"scope": "population", "rule": "biallelic_only", "threshold": "strict", "reason": "HWE/IBS/PCA/LD统一使用规范化双等位面板", "execution": "仅用于分析面板"},
+                {"scope": "site", "rule": "F_MISSING", "threshold": "<={}".format(qc_parameters.get("max_site_missing", thresholds["site_missing_warn"])), "reason": "Profile与当前VCF生成的位点缺失起始线", "estimated_removed": estimated_removed, "execution": "建议生成新副本并比较前后指标"},
+                {"scope": "sample", "rule": "missing_rate", "threshold": "<{}".format(qc_parameters.get("max_sample_missing", thresholds["sample_missing_warn"])), "reason": "Profile样本缺失提醒线", "estimated_removed": len(qc_recommendation.get("sample_exclusion_candidates") or []), "execution": "只列候选；先复核批次和深度，不自动删除"},
+                {"scope": "population", "rule": "biallelic_only", "threshold": "analysis_panel_only", "reason": "HWE/IBS/PCA/LD统一使用QC双等位面板", "estimated_removed": "NA", "execution": "仅用于分析面板，不改写原VCF"},
             ]
-            _write_rows(filters_path, recommended, ["scope", "rule", "threshold", "reason", "execution"])
+            _write_rows(filters_path, recommended, ["scope", "rule", "threshold", "reason", "estimated_removed", "execution"])
             _write_rows(groups_path, result.get("cohort_metrics", {}).get("group_summaries", []), ["dimension", "label", "sample_count", "median_missing_rate", "median_het_rate", "median_dp", "median_gq"])
             _write_rows(subgenome_path, result.get("cohort_metrics", {}).get("subgenome_summary", []), ["subgenome", "evaluated_sites", "called_genotypes", "heterozygous_genotypes", "heterozygosity_rate"])
             _write_rows(fake_het_path, result.get("fake_heterozygosity_windows", []), ["chrom", "start", "end", "evaluated_sites", "het_rate", "quarter_ab_rate", "mean_dp", "fake_het_candidate"])
             consequence_rows = [{"consequence": key, "count": value} for key, value in sorted(result.get("annotation_audit", {}).get("consequence_counts", {}).items(), key=lambda x: x[1], reverse=True)]
             _write_rows(consequences_path, consequence_rows, ["consequence", "count"])
+            readiness = result.get("analysis_readiness") or {}
+            _write_rows(priorities_path, readiness.get("top_priorities", []), ["level", "code", "scope", "target", "message", "evidence", "advice", "anchor"])
+            dimension_rows = [{"dimension": key, "score": value, "missing_is_not_zero": value is None} for key, value in (readiness.get("score_dimensions") or {}).items()]
+            _write_rows(score_dimensions_path, dimension_rows, ["dimension", "score", "missing_is_not_zero"])
             stat = Path(path).stat()
             manifest = {
                 "run_id": job["id"], "input_path": path, "input_size": stat.st_size,
                 "input_mtime_ns": stat.st_mtime_ns, "input_fingerprint": hashlib.sha256((path + str(stat.st_size) + str(stat.st_mtime_ns)).encode()).hexdigest(),
                 "schema_version": result["schema_version"], "profile": result["profile"], "scan": result["scan"],
+                "ruleset_version": "callvcf-quality-rules-1.2", "analysis_readiness": readiness,
+                "input_fingerprint_method": "sha256(path + size + mtime_ns); identity fingerprint, not a full-content checksum",
                 "conditional_inputs": {
                     "reference": result.get("reference_audit"),
                     "sample_metadata": result.get("metadata_audit"),
@@ -1537,7 +1654,7 @@ class QualityJobManager:
                 item = run_dir / name
                 if item.is_file() and item.parent == run_dir:
                     population_files.append(item)
-            core_files = [report_path, json_path, samples_path, warnings_path, variants_path, site_summary_path, density_path, modules_path, filters_path, sv_path, groups_path, subgenome_path, fake_het_path, consequences_path, manifest_path]
+            core_files = [report_path, json_path, samples_path, warnings_path, variants_path, site_summary_path, density_path, modules_path, filters_path, sv_path, groups_path, subgenome_path, fake_het_path, consequences_path, priorities_path, score_dimensions_path, manifest_path]
             with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 for item in core_files + population_files:
                     archive.write(item, item.name)
@@ -1610,6 +1727,7 @@ class QualityJobManager:
                 score_penalty += min(5, max(1, round(100 * failed / tested)))
 
         if not extra:
+            result["analysis_readiness"] = build_analysis_readiness(result)
             return
         result.setdefault("warnings", []).extend(extra)
         order = {"critical": 0, "warning": 1, "info": 2}
@@ -1618,6 +1736,7 @@ class QualityJobManager:
         summary["critical_count"] = sum(x.get("level") == "critical" for x in result["warnings"])
         summary["warning_count"] = sum(x.get("level") == "warning" for x in result["warnings"])
         summary["score"] = max(0, int(summary.get("score") or 0) - score_penalty)
+        result["analysis_readiness"] = build_analysis_readiness(result)
         summary["population_evidence_penalty"] = score_penalty
         summary["status"] = "critical" if summary["critical_count"] else "warning" if summary["warning_count"] else "pass"
 

@@ -13,7 +13,7 @@ from vcf_service import classify_variant, detect_compression, genotype_alleles, 
 from vcf_service import PurePythonVCFService
 from advanced_analysis import AdvancedAnalyzer, genotype_dosage, pairwise_r2, pairwise_dprime, parse_region, parse_trait_directions
 from tool_manager import tools_status
-from quality_engine import QualityEvaluator, QualityJobManager, render_report, _svg_ld_decay, _svg_sample_qc
+from quality_engine import QualityEvaluator, QualityJobManager, render_report, _svg_ld_decay, _svg_sample_qc, build_analysis_readiness
 from quality_profiles import resolve_profile
 from population_analysis import PopulationAnalyzer
 from repair_engine import RepairExecutor, _quality_comparison
@@ -213,9 +213,14 @@ class CoreTests(unittest.TestCase):
         self.assertIn("module_availability", result)
         self.assertEqual(result["qc_recommendation"]["parameters"]["max_site_missing"], .10)
         self.assertFalse(result["qc_recommendation"]["parameters"]["remove_samples"])
+        self.assertIn(result["analysis_readiness"]["code"], {"ready", "caution", "hold"})
+        self.assertIn("score_dimensions", result["analysis_readiness"])
         report = render_report(result)
         self.assertIn("VCF质量评估报告", report)
         self.assertIn("打印/另存为PDF", report)
+        self.assertIn("report-nav", report)
+        self.assertIn("filterWarnings", report)
+        self.assertIn("分析", result["analysis_readiness"]["title"])
         self.assertNotIn("&quot;schema_version&quot;", report)
 
     def test_quality_job_artifacts(self):
@@ -234,7 +239,7 @@ class CoreTests(unittest.TestCase):
                 time.sleep(0.02)
             self.assertEqual(current["status"], "complete", current.get("error"))
             names = {x["name"] for x in current["artifacts"]}
-            self.assertTrue({"report.html", "report_summary.json", "sample_metrics.tsv", "variant_metrics.tsv", "site_metric_summary.tsv", "density_windows.tsv", "module_availability.tsv", "recommend_filters.tsv", "sv_metrics.tsv", "group_batch_metrics.tsv", "subgenome_metrics.tsv", "fake_heterozygosity_windows.tsv", "annotation_consequences.tsv", "warnings.tsv", "run_manifest.json", "CallVCF_QC_report.zip"}.issubset(names))
+            self.assertTrue({"report.html", "report_summary.json", "sample_metrics.tsv", "variant_metrics.tsv", "site_metric_summary.tsv", "density_windows.tsv", "module_availability.tsv", "recommend_filters.tsv", "sv_metrics.tsv", "group_batch_metrics.tsv", "subgenome_metrics.tsv", "fake_heterozygosity_windows.tsv", "annotation_consequences.tsv", "analysis_priorities.tsv", "score_dimensions.tsv", "warnings.tsv", "run_manifest.json", "CallVCF_QC_report.zip"}.issubset(names))
             self.assertTrue(manager.artifact(job["id"], "report.html").is_file())
 
     def test_sv_heterozygosity_uses_cohort_outliers(self):
@@ -371,6 +376,21 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["change"]["score_delta"], 15)
         self.assertEqual(result["change"]["records_removed"], 20)
         self.assertEqual(result["change"]["resolved_warning_count"], 1)
+
+    def test_readiness_and_page_workflow_connect_analysis_steps(self):
+        readiness = build_analysis_readiness({
+            "summary": {"score": 55},
+            "warnings": [{"level": "critical", "scope": "reference", "target": "vcf", "code": "REF_MISMATCH", "message": "参考不一致", "evidence": "1/10", "advice": "核对FASTA"}],
+            "samples": [], "header_audit": {"qc_evidence_score": 50},
+        })
+        self.assertEqual(readiness["code"], "hold")
+        self.assertEqual(readiness["top_priorities"][0]["anchor"], "section-input")
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "static" / "index.html").read_text(encoding="utf-8")
+        js = (root / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="workflowPanel"', html)
+        self.assertIn("function activateTab", js)
+        self.assertIn("quality-samples", js)
 
     def test_quality_control_copy_runs_full_audit_with_simulated_backend(self):
         class Service(PurePythonVCFService):

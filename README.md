@@ -101,6 +101,10 @@ ssh -L 8765:127.0.0.1:8765 user@server
 
 样本缺失率×杂合率图使用 P98 主显示区间，并将超范围样本以贴边三角形和样本ID标出；这样既保留极端值证据，也不会让一两个异常样本把其余样本压缩在坐标原点。图中同步显示当前 Profile 的缺失率/杂合率提醒线。
 
+主页面把功能组织为“载入与识别 → 质量评估 → 质控与复评 → 查询与关联解释”的状态工作流。质量报告中的异常样本可以一键带入样本统计；查询到的位点可以直接带入全样本基因型分布、样本×位点矩阵或 Lead 高级分析，减少重复复制坐标和样本ID。
+
+离线 HTML 报告新增下游就绪结论、前5项优先问题、文件/参考、样本、位点、群体、来源证据及所选模块完成度的分层评分，并提供固定章节导航、告警级别筛选和样本搜索。缺失或未启用模块按 `NA` 显示，不当作 0 分。
+
 报告除 Header、FILTER、缺失率、MAF、Ti/Tv、DP/GQ/AB/杂合率外，还审计 QUAL/QD/MQ/FS/SOR/RankSum 分布、相位率、MNP 与 SV 子类型、SV 长度/不确定性/支持证据、INDEL 最简表达、相邻重复记录和 1 Mb 变异密度热点。下载包包含逐样本、逐位点（最多20万条评估位点）、SV、密度窗口、推荐过滤和模块可用性 TSV。
 
 生物学倍性与 VCF 的 GT 编码倍性分开设置。例如棉花在生物学上是异源四倍体，但很多 VCF 仍以 `0/0、0/1、1/1` 二倍体形式编码。GT 编码倍性默认自动识别，也可手工固定，避免产生假的倍性不符告警。
@@ -110,7 +114,7 @@ ssh -L 8765:127.0.0.1:8765 user@server
 - 智能抽样：遍历全部记录，准确统计总数、SNP/INDEL/SV 类型、FILTER 与染色体分布；跨全基因组确定性抽取目标数量位点展开逐样本 GT/DP/GQ/AD 评估。
 - 完整扫描：每条记录均进入逐样本指标计算，适合较小 VCF 或需要完整精度的场景。
 
-每次运行会生成独立目录和以下下载文件：`report.html`、`report_summary.json`、`sample_metrics.tsv`、`warnings.tsv`、`run_manifest.json` 和便携的 `CallVCF_QC_report.zip`。HTML 可离线打开，并通过浏览器打印或另存为 PDF。
+每次运行会生成独立目录和以下下载文件：`report.html`、`report_summary.json`、`sample_metrics.tsv`、`variant_metrics.tsv`、`warnings.tsv`、`analysis_priorities.tsv`、`score_dimensions.tsv`、`run_manifest.json` 和便携的 `CallVCF_QC_report.zip`；启用相关群体模块时还会加入 `pairwise_similarity.tsv`、`pca_scores.tsv` 和 `roh_segments.tsv`。HTML 可离线打开，并通过浏览器打印或另存为 PDF。
 
 质量评估可选用 PLINK 1.9 继续计算 HWE、PCA、亲缘关系（IBD/PI_HAT）、LD 衰减和 ROH。群体模块先建立二等位、缺失率和 MAF 过滤后的标记面板；PCA 与亲缘关系使用 LD 剪枝面板，LD 衰减改用未剪枝的 QC 面板，避免把真实短距离相关性预先删掉。PCA 输出稳健距离离群样本，亲缘模块输出疑似样本对、每个样本的最近邻/相似度摘要与连通分量。棉花、自交材料和多倍体 Profile 的 HWE 只作描述，不会因群体结构或繁殖方式导致全样本报警；只有适用 Profile 的 HWE 与高相似样本对会以保守方式进入分层告警，且不会自动删除样本。
 
