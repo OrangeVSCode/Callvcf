@@ -682,6 +682,12 @@ class PurePythonVCFService(VCFService):
         selected_indices = [all_samples.index(s) for s in selected_samples]
         region_chrom, region_start, region_end = region if region else (None, None, None)
         seen_region_chrom = False
+        target_stop = None
+        contig_rank = {chrom: index for index, chrom in enumerate(metadata.get("contigs") or [])}
+        if target_set and all(chrom in contig_rank for chrom, _ in target_set):
+            last_rank = max(contig_rank[chrom] for chrom, _ in target_set)
+            last_pos = max(pos for chrom, pos in target_set if contig_rank[chrom] == last_rank)
+            target_stop = (last_rank, last_pos)
         with self._open_vcf(path) as handle:
             for line in handle:
                 if line.startswith("#"):
@@ -694,6 +700,10 @@ class PurePythonVCFService(VCFService):
                     pos = int(parts[1])
                 except ValueError:
                     continue
+                if target_stop is not None and chrom in contig_rank:
+                    rank = contig_rank[chrom]
+                    if rank > target_stop[0] or (rank == target_stop[0] and pos > target_stop[1]):
+                        break
                 if region is not None:
                     if chrom != region_chrom:
                         if seen_region_chrom:
