@@ -119,6 +119,91 @@ def _warning(level, scope, target, code, message, evidence=None, advice=None):
     }
 
 
+def build_qc_recommendation(result):
+    """Build a conservative, auditable QC preset from the selected profile and observed VCF fields."""
+    profile = result.get("profile") or {}
+    thresholds = profile.get("thresholds") or {}
+    header = result.get("header_audit") or {}
+    site = result.get("site_metrics") or {}
+    format_ids = set(header.get("format_ids") or [])
+    metric_summary = site.get("quality_field_summaries") or {}
+    reference_ready = (result.get("reference_audit") or {}).get("status") == "complete"
+    parameters = {
+        "max_site_missing": float(thresholds.get("site_missing_warn", .10)),
+        "max_sample_missing": float(thresholds.get("sample_missing_warn", .05)),
+        "min_dp": float(thresholds.get("median_dp_min_warn", 5)) if "DP" in format_ids else None,
+        "max_dp": None,
+        "min_gq": float(thresholds.get("median_gq_warn", 20)) if "GQ" in format_ids else None,
+        "min_qual": None,
+        "min_maf": 0.0,
+        "min_qd": None,
+        "min_mq": None,
+        "max_fs": None,
+        "max_sor": None,
+        "pass_only": False,
+        "biallelic_only": False,
+        "normalize": bool(reference_ready and site.get("nonminimal_indel_count")),
+        "deduplicate": bool(site.get("adjacent_duplicate_count")),
+        "remove_samples": False,
+    }
+    broad_types = site.get("broad_variant_types") or {}
+    dominant_type = max(broad_types, key=broad_types.get) if broad_types else None
+    dominant_fraction = broad_types.get(dominant_type, 0) / max(sum(broad_types.values()), 1)
+    if dominant_fraction >= .90 and (metric_summary.get("QD") or {}).get("coverage", 0) >= .80:
+        parameters["min_qd"] = 2.0
+    if dominant_type == "SNP" and dominant_fraction >= .90:
+        if (metric_summary.get("MQ") or {}).get("coverage", 0) >= .80:
+            parameters["min_mq"] = 40.0
+        if (metric_summary.get("FS") or {}).get("coverage", 0) >= .80:
+            parameters["max_fs"] = 60.0
+        if (metric_summary.get("SOR") or {}).get("coverage", 0) >= .80:
+            parameters["max_sor"] = 3.0
+    elif dominant_type == "INDEL" and dominant_fraction >= .90 and (metric_summary.get("FS") or {}).get("coverage", 0) >= .80:
+        parameters["max_fs"] = 200.0
+    reasons = [
+        "位点缺失上限采用“{}”Profile的提醒线 {}".format(profile.get("name") or profile.get("id") or "当前", _ratio(parameters["max_site_missing"])),
+        "低质量GT仅在VCF实际含DP/GQ时掩蔽；缺失字段不会被当作0",
+        "默认保留稀有、多等位和非PASS记录，避免在未知caller/研究目的下过度过滤",
+        "样本删除默认关闭；候选样本只列出，必须由用户显式启用",
+    ]
+    if any(parameters[key] is not None for key in ("min_qd", "min_mq", "max_fs", "max_sor")):
+        reasons.append("检测到{}占比高且相应质量字段覆盖充分，启用caller-aware位点质量起始线".format(dominant_type))
+    else:
+        reasons.append("位点质量字段覆盖不足或VCF类型混合，默认不机械套用QD/MQ/FS/SOR阈值")
+    if reference_ready:
+        reasons.append("已完成参考FASTA核验，可在存在非最简INDEL时启用标准化")
+    else:
+        reasons.append("未完成参考FASTA核验，自动方案不执行左对齐/标准化")
+    candidates = [
+        item.get("sample_id") for item in result.get("samples", [])
+        if item.get("missing_rate") is not None and item["missing_rate"] >= parameters["max_sample_missing"]
+    ]
+    sampled_rows = result.get("_variant_metrics_rows") or []
+    evaluable = [item for item in sampled_rows if item.get("missing_rate") is not None]
+    estimated_removed = sum(item["missing_rate"] > parameters["max_site_missing"] for item in evaluable)
+    mask_parts = []
+    if parameters["min_dp"] is not None:
+        mask_parts.append("FMT/DP<{}".format(_fmt(parameters["min_dp"])))
+    if parameters["min_gq"] is not None:
+        mask_parts.append("FMT/GQ<{}".format(_fmt(parameters["min_gq"])))
+    return {
+        "mode": "profile_adaptive",
+        "profile_id": profile.get("id"),
+        "profile_name": profile.get("name"),
+        "parameters": parameters,
+        "available_fields": {
+            "format": sorted(format_ids),
+            "site_quality": {key: value.get("coverage") for key, value in metric_summary.items()},
+        },
+        "sample_exclusion_candidates": [x for x in candidates if x],
+        "estimated_site_removal_fraction": estimated_removed / len(evaluable) if evaluable else None,
+        "estimated_from_records": len(evaluable),
+        "mask_expression_preview": " || ".join(mask_parts) or None,
+        "site_expression_preview": "F_MISSING<={}".format(_fmt(parameters["max_site_missing"])),
+        "reasons": reasons,
+    }
+
+
 def parse_gt(gt_text):
     gt = str(gt_text or ".").replace("|", "/")
     parts = gt.split("/")
@@ -968,7 +1053,7 @@ class QualityEvaluator:
         phase_values = [x["phase_rate"] for x in report_samples if x.get("phase_rate") is not None]
         sample_scores = [x["sample_score"] for x in report_samples if x.get("sample_score") is not None]
         result = {
-            "schema_version": "callvcf-qc-1.1",
+            "schema_version": "callvcf-qc-1.2",
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "input": {
                 "path": path, "name": metadata["name"], "file_size": metadata["file_size"],
@@ -1037,11 +1122,12 @@ class QualityEvaluator:
             "warnings": warnings,
             "repair_policy": {
                 "safe_actions": ["建立缺失索引", "生成新的排序副本"],
-                "dangerous_actions": ["标准化/拆分", "补全INFO统计标签", "去重", "样本子集", "按条件掩蔽GT", "位点过滤", "覆盖原VCF", "改写REF/ALT", "坐标转换", "染色体批量重命名", "删除原文件"],
+                "dangerous_actions": ["自适应/自定义组合质控", "标准化/拆分", "补全INFO统计标签", "去重", "样本子集", "按条件掩蔽GT", "位点过滤", "覆盖原VCF", "改写REF/ALT", "坐标转换", "染色体批量重命名", "删除原文件"],
                 "dangerous_requires_second_confirmation": True,
                 "original_is_never_silently_overwritten": True,
             },
         }
+        result["qc_recommendation"] = build_qc_recommendation(result)
         if progress:
             progress(total_records, 100.0, "质量评估完成，正在生成报告")
         return result
@@ -1126,24 +1212,59 @@ def _svg_ld_decay(rows, width=760, height=300):
     )
 
 
-def _svg_sample_qc(rows, width=760, height=340):
+def _svg_sample_qc(rows, thresholds=None, width=760, height=340):
     points = [(x.get("missing_rate"), x.get("het_rate"), x.get("sample_id"), x.get("sample_status"), x.get("group") or x.get("batch") or "") for x in rows]
     points = [x for x in points if x[0] is not None and x[1] is not None]
     if not points:
         return '<div class="empty">没有可绘制的样本缺失率/杂合率</div>'
-    xmax = max(max(x[0] for x in points) * 1.08, .01)
-    ymax = max(max(x[1] for x in points) * 1.08, .01)
+    thresholds = thresholds or {}
+    missing_values = [x[0] for x in points]
+    het_values = [x[1] for x in points]
+    missing_warn = _safe_float(thresholds.get("sample_missing_warn"))
+    het_warn = _safe_float(thresholds.get("het_rate_warn"))
+    x_core = _quantile(missing_values, .98) if len(points) >= 20 else max(missing_values)
+    y_core = _quantile(het_values, .98) if len(points) >= 20 else max(het_values)
+    xmax = max((x_core or 0) * 1.18, (missing_warn or 0) * 1.15, .01)
+    ymax = max((y_core or 0) * 1.18, (het_warn or 0) * 1.15, .05)
+    left, right, top, bottom = 66, 24, 34, 54
+    plot_w, plot_h = width - left - right, height - top - bottom
     colors = {"pass": "#2f725f", "warning": "#d18b00", "critical": "#a62d33"}
-    circles = []
+    grid = []
+    for index in range(5):
+        fraction = index / 4
+        x = left + fraction * plot_w
+        y = top + (1 - fraction) * plot_h
+        grid.append('<line x1="{x:.2f}" y1="{top}" x2="{x:.2f}" y2="{base}" stroke="#dce6e1"/><text x="{x:.2f}" y="{label}" text-anchor="middle" font-size="11" fill="#65776f">{value}</text>'.format(
+            x=x, top=top, base=top + plot_h, label=height - 29, value=_ratio(fraction * xmax)))
+        grid.append('<line x1="{left}" y1="{y:.2f}" x2="{end}" y2="{y:.2f}" stroke="#dce6e1"/><text x="{label}" y="{y:.2f}" text-anchor="end" dominant-baseline="middle" font-size="11" fill="#65776f">{value}</text>'.format(
+            left=left, end=left + plot_w, y=y, label=left - 8, value=_ratio(fraction * ymax)))
+    threshold_marks = []
+    if missing_warn is not None and 0 < missing_warn < xmax:
+        x = left + missing_warn / xmax * plot_w
+        threshold_marks.append('<line x1="{0:.2f}" y1="{1}" x2="{0:.2f}" y2="{2}" stroke="#c58a28" stroke-width="1.5" stroke-dasharray="5 4"/><text x="{0:.2f}" y="{3}" text-anchor="middle" font-size="10" fill="#8a611d">缺失提醒线</text>'.format(x, top, top + plot_h, top - 10))
+    if het_warn is not None and 0 < het_warn < ymax:
+        y = top + (1 - het_warn / ymax) * plot_h
+        threshold_marks.append('<line x1="{0}" y1="{1:.2f}" x2="{2}" y2="{1:.2f}" stroke="#c58a28" stroke-width="1.5" stroke-dasharray="5 4"/><text x="{2}" y="{3:.2f}" text-anchor="end" font-size="10" fill="#8a611d">杂合提醒线</text>'.format(left, y, left + plot_w, y - 5))
+    marks = []
+    clipped_labels = []
     for missing, het, sample, status, group in points:
-        px = 58 + missing / xmax * (width - 90)
-        py = 25 + (1 - het / ymax) * (height - 78)
-        circles.append('<circle cx="{:.2f}" cy="{:.2f}" r="4" fill="{}" opacity=".78"><title>{}{}：缺失率={}；杂合率={}</title></circle>'.format(
-            px, py, colors.get(status, colors["pass"]), html.escape(str(sample)),
-            " · " + html.escape(group) if group else "", _ratio(missing), _ratio(het)))
-    return '<svg viewBox="0 0 {} {}" role="img" aria-label="sample missingness heterozygosity"><line x1="58" y1="{}" x2="{}" y2="{}" stroke="#9eb2aa"/><line x1="58" y1="25" x2="58" y2="{}" stroke="#9eb2aa"/><text x="{}" y="{}" text-anchor="middle">样本缺失率（最大{}）</text><text x="16" y="{}" transform="rotate(-90 16 {})" text-anchor="middle">杂合率（最大{}）</text>{}</svg>'.format(
-        width, height, height - 53, width - 30, height - 53, height - 53, width / 2, height - 12,
-        _ratio(xmax), height / 2, height / 2, _ratio(ymax), "".join(circles))
+        clipped_x, clipped_y = missing > xmax, het > ymax
+        px = left + min(missing, xmax) / xmax * plot_w
+        py = top + (1 - min(het, ymax) / ymax) * plot_h
+        tooltip = '{}{}：缺失率={}；杂合率={}'.format(html.escape(str(sample)), " · " + html.escape(group) if group else "", _ratio(missing), _ratio(het))
+        color = colors.get(status, colors["pass"])
+        if clipped_x or clipped_y:
+            points_text = "{:.2f},{:.2f} {:.2f},{:.2f} {:.2f},{:.2f}".format(px, py - 6, px - 5.5, py + 4.5, px + 5.5, py + 4.5)
+            marks.append('<polygon points="{}" fill="{}" stroke="#ffffff" stroke-width="1.2"><title>{}；超出主显示范围</title></polygon>'.format(points_text, color, tooltip))
+            if len(clipped_labels) < 6:
+                clipped_labels.append('<text x="{:.2f}" y="{:.2f}" text-anchor="end" font-size="10" fill="#53645d">{}</text>'.format(px - 7, max(top + 10, py - 8), html.escape(str(sample))))
+        else:
+            marks.append('<circle cx="{:.2f}" cy="{:.2f}" r="3.6" fill="{}" stroke="#ffffff" stroke-width=".8" opacity=".82"><title>{}</title></circle>'.format(px, py, color, tooltip))
+    legend = '<g transform="translate({},{})" font-size="10" fill="#53645d"><circle cx="0" cy="0" r="3.5" fill="#2f725f"/><text x="8" y="3">通过</text><circle cx="50" cy="0" r="3.5" fill="#d18b00"/><text x="58" y="3">提醒</text><circle cx="100" cy="0" r="3.5" fill="#a62d33"/><text x="108" y="3">关键</text><polygon points="157,-5 152,4 162,4" fill="#65776f"/><text x="168" y="3">超出P98主区间</text></g>'.format(left + 8, 16)
+    return '<svg viewBox="0 0 {width} {height}" role="img" aria-labelledby="sample-qc-title sample-qc-desc"><title id="sample-qc-title">样本缺失率与杂合率</title><desc id="sample-qc-desc">主坐标按百分之九十八分位缩放，超范围样本以三角形贴边并直接标注。</desc>{legend}{grid}{thresholds}<line x1="{left}" y1="{base}" x2="{end}" y2="{base}" stroke="#83978e"/><line x1="{left}" y1="{top}" x2="{left}" y2="{base}" stroke="#83978e"/><text x="{mid_x}" y="{axis_y}" text-anchor="middle" font-size="12">样本缺失率</text><text x="17" y="{mid_y}" transform="rotate(-90 17 {mid_y})" text-anchor="middle" font-size="12">样本杂合率</text>{marks}{labels}</svg>'.format(
+        width=width, height=height, legend=legend, grid="".join(grid), thresholds="".join(threshold_marks),
+        left=left, base=top + plot_h, end=left + plot_w, top=top, mid_x=left + plot_w / 2,
+        axis_y=height - 7, mid_y=top + plot_h / 2, marks="".join(marks), labels="".join(clipped_labels))
 
 
 def render_report(result):
@@ -1202,6 +1323,9 @@ def render_report(result):
         html.escape(str(x["chrom"])), _fmt(x["start"], 0), _fmt(x["end"], 0), _ratio(x["het_rate"]),
         _ratio(x["quarter_ab_rate"]), _fmt(x["mean_dp"]), "是" if x["fake_het_candidate"] else "")
         for x in result.get("fake_heterozygosity_windows", [])[:30]]
+    qc_recommendation = result.get("qc_recommendation") or {}
+    qc_parameter_rows = ["<tr><td>{}</td><td>{}</td></tr>".format(html.escape(str(key)), html.escape(str(value if value is not None else "关闭"))) for key, value in (qc_recommendation.get("parameters") or {}).items()]
+    qc_reason_rows = "".join("<li>{}</li>".format(html.escape(str(item))) for item in qc_recommendation.get("reasons", []))
     embedded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
     template = """<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>CallVCF质量评估报告</title><style>
     :root{--ink:#18342b;--muted:#667a72;--line:#d8e2dd;--brand:#2f725f;--soft:#f2f7f4;--warn:#a96200;--crit:#a62d33}*{box-sizing:border-box}body{margin:0;background:#edf3ef;color:var(--ink);font-family:"Microsoft YaHei",Arial,sans-serif}main{max-width:1180px;margin:auto;padding:30px}.hero,.card{background:white;border:1px solid var(--line);border-radius:18px;padding:24px;margin-bottom:18px}.hero{background:linear-gradient(135deg,#173c31,#347966);color:white}.hero h1{font-size:34px;margin:5px 0}.hero p{opacity:.82}.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}.kpi{background:var(--soft);border-radius:14px;padding:16px}.kpi b{display:block;font-size:25px;margin-top:6px}.score{font-size:64px;font-weight:800}.status-pass{color:#d6ffe8}.status-warning{color:#ffe09c}.status-critical{color:#ffb1b4}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}h2{font-size:21px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;padding:9px;border-bottom:1px solid #e8eeeb}th{position:sticky;top:0;background:#f6faf8}.table{max-height:520px;overflow:auto;border:1px solid var(--line);border-radius:10px}.badge{padding:3px 7px;border-radius:10px;font-weight:700}.badge.info{background:#e8eef3}.badge.warning{background:#fff0cc;color:#805000}.badge.critical{background:#ffe0e1;color:#98242b}.note{padding:12px;background:#fff7df;border-left:4px solid #d18b00}.actions{display:flex;gap:8px;flex-wrap:wrap}.actions button{border:0;border-radius:9px;padding:10px 14px;background:#e8f1ed;color:var(--ink);cursor:pointer}.actions button:first-child{background:white}.empty{padding:30px;color:var(--muted)}svg{width:100%;height:auto}@media(max-width:800px){.kpis,.grid{grid-template-columns:1fr 1fr}}@media print{body{background:white}main{max-width:none;padding:0}.actions{display:none}.card,.hero{break-inside:avoid;border-color:#bbb}.table{max-height:none;overflow:visible}}
@@ -1216,6 +1340,7 @@ def render_report(result):
     <section class='card'><h2>分组与批次质量</h2><div class='table'><table><thead><tr><th>维度</th><th>标签</th><th>样本数</th><th>中位缺失率</th><th>中位杂合率</th><th>中位DP</th><th>中位GQ</th></tr></thead><tbody>{group_rows}</tbody></table></div></section>
     <div class='grid'><section class='card'><h2>亚基因组概览</h2><div class='table'><table><thead><tr><th>亚基因组</th><th>评估位点</th><th>有效GT</th><th>杂合率</th></tr></thead><tbody>{subgenome_rows}</tbody></table></div></section><section class='card'><h2>假杂合候选窗口（前30）</h2><div class='table'><table><thead><tr><th>窗口</th><th>杂合率</th><th>0.25/0.75 AB比例</th><th>平均DP</th><th>候选</th></tr></thead><tbody>{fake_window_rows}</tbody></table></div></section></div>
     <section class='card'><h2>告警与建议</h2><div class='table'><table><thead><tr><th>级别</th><th>范围</th><th>对象</th><th>问题</th><th>建议</th></tr></thead><tbody>{warning_rows}</tbody></table></div></section>
+    <section class='card'><h2>物种与VCF自适应质控建议</h2><p class='note'>这是保守起始方案，不会自动覆盖原VCF。预计触发位点过滤：{qc_estimated_removal}；高缺失候选样本：{qc_candidate_samples} 个，默认不自动删除。</p><div class='grid'><div class='table'><table><thead><tr><th>参数</th><th>推荐值</th></tr></thead><tbody>{qc_parameter_rows}</tbody></table></div><div><ul>{qc_reason_rows}</ul></div></div></section>
     <section class='card'><h2>样本质量指标</h2><div class='table'><table><thead><tr><th>样本</th><th>Group</th><th>Batch</th><th>样本分</th><th>状态</th><th>缺失率</th><th>杂合率</th><th>中位DP</th><th>中位GQ</th><th>AB异常</th><th>相位率</th></tr></thead><tbody>{sample_rows}</tbody></table></div></section>
     <section class='card'><h2>有效阈值与来源</h2><div class='table'><table><thead><tr><th>阈值</th><th>有效值</th><th>来源</th></tr></thead><tbody>{threshold_rows}</tbody></table></div></section>
     {population_section}
@@ -1236,7 +1361,7 @@ def render_report(result):
         "sv_chart": _svg_bars(list((site.get("sv_length_bins") or {}).items()), "SV长度"),
         "metric_rows": "".join(metric_rows) or "<tr><td colspan='6'>VCF未提供这些字段</td></tr>",
         "availability_rows": "".join(availability_rows),
-        "sample_qc_chart": _svg_sample_qc(result.get("samples", [])),
+        "sample_qc_chart": _svg_sample_qc(result.get("samples", []), result.get("profile", {}).get("thresholds", {})),
         "group_rows": "".join(group_rows) or "<tr><td colspan='7'>未提供样本元数据或没有可分组字段</td></tr>",
         "subgenome_rows": "".join(subgenome_rows) or "<tr><td colspan='4'>无可分配亚基因组</td></tr>",
         "fake_window_rows": "".join(fake_window_rows) or "<tr><td colspan='5'>没有候选窗口</td></tr>",
@@ -1250,6 +1375,9 @@ def render_report(result):
         "evidence_score": result.get("header_audit", {}).get("qc_evidence_score", "—"),
         "nonminimal": site.get("nonminimal_indel_count", 0), "duplicates": site.get("adjacent_duplicate_count", 0),
         "warning_rows": "".join(warning_rows) or "<tr><td colspan='5'>未触发告警</td></tr>", "sample_rows": "".join(sample_rows),
+        "qc_estimated_removal": _ratio(qc_recommendation.get("estimated_site_removal_fraction")),
+        "qc_candidate_samples": len(qc_recommendation.get("sample_exclusion_candidates") or []),
+        "qc_parameter_rows": "".join(qc_parameter_rows) or "<tr><td colspan='2'>无可用参数</td></tr>", "qc_reason_rows": qc_reason_rows,
         "threshold_rows": "".join(threshold_rows), "population_section": population_section, "embedded": embedded,
     }
     for key, value in values.items():

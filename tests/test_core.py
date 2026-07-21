@@ -1,4 +1,5 @@
 import gzip
+import os
 import struct
 import sys
 import tempfile
@@ -12,10 +13,10 @@ from vcf_service import classify_variant, detect_compression, genotype_alleles, 
 from vcf_service import PurePythonVCFService
 from advanced_analysis import AdvancedAnalyzer, genotype_dosage, pairwise_r2, pairwise_dprime, parse_region, parse_trait_directions
 from tool_manager import tools_status
-from quality_engine import QualityEvaluator, QualityJobManager, render_report, _svg_ld_decay
+from quality_engine import QualityEvaluator, QualityJobManager, render_report, _svg_ld_decay, _svg_sample_qc
 from quality_profiles import resolve_profile
 from population_analysis import PopulationAnalyzer
-from repair_engine import RepairExecutor
+from repair_engine import RepairExecutor, _quality_comparison
 
 
 def bgzf_block(data):
@@ -210,6 +211,8 @@ class CoreTests(unittest.TestCase):
         self.assertIn("quality_field_summaries", result["site_metrics"])
         self.assertIn("phase_rate", result["samples"][0])
         self.assertIn("module_availability", result)
+        self.assertEqual(result["qc_recommendation"]["parameters"]["max_site_missing"], .10)
+        self.assertFalse(result["qc_recommendation"]["parameters"]["remove_samples"])
         report = render_report(result)
         self.assertIn("VCF质量评估报告", report)
         self.assertIn("打印/另存为PDF", report)
@@ -272,8 +275,8 @@ class CoreTests(unittest.TestCase):
             fasta = root / "ref.fa"
             sequence = list("A" * 1000000)
             sequence[200] = "T"; sequence[299] = "N"
-            fasta.write_text(">1\n" + "".join(sequence) + "\n", encoding="ascii")
-            Path(str(fasta) + ".fai").write_text("1\t1000000\t4\t1000000\t1000002\n", encoding="ascii")
+            fasta.write_bytes(b">1\n" + "".join(sequence).encode("ascii") + b"\n")
+            Path(str(fasta) + ".fai").write_text("1\t1000000\t3\t1000000\t1000001\n", encoding="ascii")
             metadata = root / "samples.tsv"
             metadata.write_text("sample_id\tgroup\tbatch\nS1\tG1\tB1\nS2\tG1\tB1\nS3\tG2\tB2\nS4\tG2\tB2\n", encoding="utf-8")
             bed = root / "regions.bed"
@@ -332,6 +335,16 @@ class CoreTests(unittest.TestCase):
         self.assertIn("exact", dedup["command_preview"])
         self.assertIn("S1,S2", subset["command_preview"])
         self.assertIn("+setGT", mask["command_preview"])
+        with tempfile.TemporaryDirectory(prefix="callvcf-qc-plan-") as temp_name:
+            qc = executor.plan({
+                "action": "quality_control_copy", "path": str(fixture),
+                "output_path": str(Path(temp_name) / "qc.vcf.gz"),
+                "quality_profile": {"profile_id": "generic_diploid_plant"},
+                "qc_parameters": {"mode": "profile_adaptive", "max_site_missing": .1, "min_dp": 5, "min_gq": 20},
+            })
+        self.assertEqual(qc["risk"], "dangerous")
+        self.assertEqual(qc["qc_parameters"]["max_site_missing"], .1)
+        self.assertIn("前后复评", qc["command_preview"])
 
     def test_ld_decay_chart_auto_scales_small_r2_values(self):
         svg = _svg_ld_decay([
@@ -342,6 +355,74 @@ class CoreTests(unittest.TestCase):
         self.assertIn("0.0231", svg)
         self.assertIn("8,073 pairs", svg)
         self.assertNotIn("0–1</text>", svg)
+
+    def test_sample_qc_chart_uses_robust_axis_and_clipped_outlier(self):
+        rows = [{"sample_id": "S{}".format(i), "missing_rate": .002 + i / 100000, "het_rate": .03, "sample_status": "pass"} for i in range(30)]
+        rows.append({"sample_id": "OUT", "missing_rate": .4, "het_rate": .6, "sample_status": "warning"})
+        svg = _svg_sample_qc(rows, {"sample_missing_warn": .05, "het_rate_warn": .05})
+        self.assertIn("超出P98主区间", svg)
+        self.assertIn("OUT", svg)
+        self.assertIn("缺失提醒线", svg)
+
+    def test_quality_comparison_reports_delta_and_next_steps(self):
+        before = {"summary": {"score": 70, "status": "warning", "record_count": 100, "sample_count": 2, "critical_count": 0, "warning_count": 1}, "samples": [{"sample_status": "warning"}, {"sample_status": "pass"}], "warnings": [{"code": "A", "scope": "site", "target": "x", "advice": "复核A"}]}
+        after = {"summary": {"score": 85, "status": "pass", "record_count": 80, "sample_count": 2, "critical_count": 0, "warning_count": 0}, "samples": [{"sample_status": "pass"}, {"sample_status": "pass"}], "warnings": []}
+        result = _quality_comparison(before, after, {"max_site_missing": .1})
+        self.assertEqual(result["change"]["score_delta"], 15)
+        self.assertEqual(result["change"]["records_removed"], 20)
+        self.assertEqual(result["change"]["resolved_warning_count"], 1)
+
+    def test_quality_control_copy_runs_full_audit_with_simulated_backend(self):
+        class Service(PurePythonVCFService):
+            bcftools = "simulated-bcftools"
+
+        class SimulatedExecutor(RepairExecutor):
+            def _bcftools_command(self, arguments, path_indexes=()):
+                return [str(x) for x in arguments]
+
+            def _run_process(self, command, log, cancel):
+                if command[0] == "index":
+                    Path(command[command.index("-o") + 1]).write_bytes(b"simulated-csi")
+                    return
+                output = Path(command[command.index("-o") + 1])
+                source = Path(command[-1] if command[0] in {"view", "norm", "sort"} else command[1])
+                raw = source.read_bytes()
+                if raw.startswith(b"\x1f\x8b"):
+                    raw = gzip.decompress(raw)
+                with gzip.open(output, "wb") as handle:
+                    handle.write(raw)
+
+            def _run_to_file(self, command, destination, log, cancel):
+                Path(destination).write_text("SN\t0\tnumber of records:\t3\n", encoding="utf-8")
+
+        fixture = Path(__file__).resolve().parent / "fixtures" / "tiny.vcf"
+        with tempfile.TemporaryDirectory(prefix="callvcf-qc-execute-") as temp_name:
+            output = Path(temp_name) / "qc.vcf.gz"
+            previous_local = os.environ.get("LOCALAPPDATA")
+            os.environ["LOCALAPPDATA"] = temp_name
+            service = Service()
+            service.bcftools = "simulated-bcftools"
+            executor = SimulatedExecutor(service)
+            plan = executor.plan({
+                "action": "quality_control_copy", "path": str(fixture), "output_path": str(output),
+                "quality_profile": {"profile_id": "generic_diploid_plant"},
+                "qc_parameters": {"max_site_missing": .1, "min_dp": 5, "min_gq": 20},
+            })
+            executor.execute({"plan_id": plan["id"], "confirmation": plan["confirmation_phrase"]})
+            for _ in range(100):
+                status = executor.status(plan["id"])
+                if status["status"] in {"complete", "failed", "cancelled"}:
+                    break
+                import time
+                time.sleep(.02)
+            self.assertEqual(status["status"], "complete", status.get("error"))
+            self.assertTrue(output.is_file())
+            self.assertIn("qc_comparison", status["result"])
+            self.assertTrue(Path(status["result"]["qc_comparison_report"]).is_file())
+            if previous_local is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous_local
 
     def test_population_pair_evidence_is_merged_conservatively(self):
         result = {

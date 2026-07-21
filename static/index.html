@@ -254,11 +254,35 @@
             <h4>安全自动修复执行器</h4>
             <p class="sub" id="repairAvailability">正在检测bcftools…</p>
             <div class="advanced-grid">
-              <label class="field"><span>操作</span><select id="repairAction"><option value="index">建立缺失CSI索引</option><option value="sort_copy">生成排序后的新副本</option><option value="normalize_copy">生成标准化/拆分的新副本（需二次确认）</option><option value="fill_tags_copy">补全统计标签的新副本（需二次确认）</option><option value="deduplicate_copy">移除完全重复记录的新副本（需二次确认）</option><option value="subset_samples_copy">保留指定样本的新副本（需二次确认）</option><option value="mask_genotypes_copy">低质量GT设为缺失的新副本（需二次确认）</option><option value="filter_copy">按条件保留位点的新副本（需二次确认）</option></select></label>
+              <label class="field"><span>操作</span><select id="repairAction"><option value="quality_control_copy">智能质控并进行前后复评（推荐）</option><option value="index">建立缺失CSI索引</option><option value="sort_copy">生成排序后的新副本</option><option value="normalize_copy">生成标准化/拆分的新副本（需二次确认）</option><option value="fill_tags_copy">补全统计标签的新副本（需二次确认）</option><option value="deduplicate_copy">移除完全重复记录的新副本（需二次确认）</option><option value="subset_samples_copy">保留指定样本的新副本（需二次确认）</option><option value="mask_genotypes_copy">低质量GT设为缺失的新副本（需二次确认）</option><option value="filter_copy">按条件保留位点的新副本（需二次确认）</option></select></label>
               <label class="field span-2 repair-output-field hidden"><span>新输出VCF.GZ</span><div class="resource-input"><input id="repairOutputPath" type="text" placeholder="必须是尚不存在的新路径"><button class="secondary browse-resource" data-target="repairOutputPath" data-kind="repair_output">选择…</button></div></label>
               <label class="field span-2 repair-reference-field hidden"><span>参考基因组FASTA</span><div class="resource-input"><input id="repairReferencePath" type="text"><button class="secondary browse-resource" data-target="repairReferencePath" data-kind="reference">选择…</button></div></label>
               <label class="field span-2 repair-samples-field hidden"><span>要保留的样本ID</span><textarea id="repairSamples" rows="4" placeholder="每行一个样本，或用逗号分隔"></textarea></label>
               <label class="field span-2 repair-expression-field hidden"><span id="repairExpressionLabel">bcftools表达式</span><input id="repairExpression" type="text" placeholder="例如：QUAL>=30 &amp;&amp; F_MISSING&lt;0.1"></label>
+              <div class="span-2 repair-qc-field hidden">
+                <div class="notice" id="qcRecommendationSummary">请先运行上方质量评估，软件会根据物种Profile、VCF类型和实际可用字段生成保守默认参数。</div>
+                <div class="threshold-grid compact-grid">
+                  <label class="field"><span>质控参数模式</span><select id="qcMode"><option value="profile_adaptive">物种与VCF自适应默认</option><option value="custom">使用者自定义</option></select></label>
+                  <label class="field"><span>位点缺失率上限</span><input id="qcMaxSiteMissing" class="qc-parameter" type="number" min="0" max="1" step="0.01" value="0.10"></label>
+                  <label class="field"><span>候选样本缺失率上限</span><input id="qcMaxSampleMissing" class="qc-parameter" type="number" min="0" max="1" step="0.01" value="0.05"></label>
+                  <label class="field"><span>GT最小DP（空=关闭）</span><input id="qcMinDp" class="qc-parameter" type="number" min="0" step="1"></label>
+                  <label class="field"><span>GT最大DP（空=关闭）</span><input id="qcMaxDp" class="qc-parameter" type="number" min="0" step="1"></label>
+                  <label class="field"><span>GT最小GQ（空=关闭）</span><input id="qcMinGq" class="qc-parameter" type="number" min="0" step="1"></label>
+                  <label class="field"><span>位点最小QUAL（空=关闭）</span><input id="qcMinQual" class="qc-parameter" type="number" min="0" step="1"></label>
+                  <label class="field"><span>最小MAF（默认0保留稀有位点）</span><input id="qcMinMaf" class="qc-parameter" type="number" min="0" max="0.5" step="0.01" value="0"></label>
+                  <label class="field"><span>最小QD（空=关闭）</span><input id="qcMinQd" class="qc-parameter" type="number" min="0" step="0.1"></label>
+                  <label class="field"><span>最小MQ（空=关闭）</span><input id="qcMinMq" class="qc-parameter" type="number" min="0" step="0.1"></label>
+                  <label class="field"><span>最大FS（空=关闭）</span><input id="qcMaxFs" class="qc-parameter" type="number" min="0" step="1"></label>
+                  <label class="field"><span>最大SOR（空=关闭）</span><input id="qcMaxSor" class="qc-parameter" type="number" min="0" step="0.1"></label>
+                </div>
+                <div class="population-options">
+                  <label><input id="qcPassOnly" class="qc-parameter" type="checkbox"><span><b>仅保留PASS</b><small>默认关闭，避免误解caller自定义FILTER</small></span></label>
+                  <label><input id="qcBiallelic" class="qc-parameter" type="checkbox"><span><b>仅保留双等位</b><small>适合GWAS/LD面板，不适合所有用途</small></span></label>
+                  <label><input id="qcNormalize" class="qc-parameter" type="checkbox"><span><b>参考标准化</b><small>需要同版本FASTA</small></span></label>
+                  <label><input id="qcDeduplicate" class="qc-parameter" type="checkbox"><span><b>精确去重</b><small>仅移除完全重复记录</small></span></label>
+                  <label><input id="qcRemoveSamples" class="qc-parameter" type="checkbox"><span><b>排除高缺失候选样本</b><small>高风险，默认关闭并在确认窗口列出</small></span></label>
+                </div>
+              </div>
             </div>
             <div class="button-row"><button class="secondary hidden" id="repairCancelBtn">取消执行</button><button class="primary" id="repairPlanBtn">生成并核对执行计划</button></div>
             <div id="repairResult" class="notice">尚未生成计划；任何操作都不会静默修改原VCF。</div>

@@ -1,4 +1,4 @@
-const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null, qualityCatalog: null, qualityRun: null, qualityPoll: null, repairCatalog: null, repairPlan: null, repairPoll: null };
+const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null, qualityCatalog: null, qualityRun: null, qualityPoll: null, qcRecommendation: null, repairCatalog: null, repairPlan: null, repairPoll: null };
 const $ = (id) => document.getElementById(id);
 const categoryOrder = ["HOM_REF", "HET", "HOM_ALT", "MISSING", "OTHER"];
 const shortLabels = { HOM_REF: "0/0", HET: "0/1", HOM_ALT: "1/1", MISSING: "缺失", OTHER: "其他" };
@@ -714,6 +714,7 @@ function applyQualityProfile() {
   $("qualitySubgenomes").value = profile.subgenomes || 1;
   $("qualityMating").value = profile.mating_system || "unknown";
   localStorage.setItem("callvcfQualityProfile", profile.id);
+  state.qcRecommendation = null;
 }
 
 function qualityPayload() {
@@ -752,6 +753,48 @@ function qualityPayload() {
   };
 }
 
+function nullableNumber(id) {
+  const value = $(id).value.trim();
+  return value === "" ? null : Number(value);
+}
+
+function qcParametersPayload() {
+  return {
+    mode: $("qcMode").value,
+    max_site_missing: nullableNumber("qcMaxSiteMissing"), max_sample_missing: nullableNumber("qcMaxSampleMissing"),
+    min_dp: nullableNumber("qcMinDp"), max_dp: nullableNumber("qcMaxDp"), min_gq: nullableNumber("qcMinGq"),
+    min_qual: nullableNumber("qcMinQual"), min_maf: nullableNumber("qcMinMaf"), min_qd: nullableNumber("qcMinQd"),
+    min_mq: nullableNumber("qcMinMq"), max_fs: nullableNumber("qcMaxFs"), max_sor: nullableNumber("qcMaxSor"),
+    pass_only: $("qcPassOnly").checked, biallelic_only: $("qcBiallelic").checked,
+    normalize: $("qcNormalize").checked, deduplicate: $("qcDeduplicate").checked, remove_samples: $("qcRemoveSamples").checked,
+  };
+}
+
+function updateQcMode() {
+  const custom = $("qcMode").value === "custom";
+  document.querySelectorAll(".qc-parameter").forEach(input => { input.disabled = !custom; });
+  updateRepairFields();
+}
+
+function applyQcRecommendation(recommendation) {
+  state.qcRecommendation = recommendation || null;
+  if (!recommendation) return;
+  const p = recommendation.parameters || {};
+  const mapping = {
+    qcMaxSiteMissing:"max_site_missing", qcMaxSampleMissing:"max_sample_missing", qcMinDp:"min_dp", qcMaxDp:"max_dp",
+    qcMinGq:"min_gq", qcMinQual:"min_qual", qcMinMaf:"min_maf", qcMinQd:"min_qd", qcMinMq:"min_mq", qcMaxFs:"max_fs", qcMaxSor:"max_sor",
+  };
+  Object.entries(mapping).forEach(([id,key]) => { $(id).value = p[key] == null ? "" : p[key]; });
+  $("qcPassOnly").checked = !!p.pass_only; $("qcBiallelic").checked = !!p.biallelic_only;
+  $("qcNormalize").checked = !!p.normalize; $("qcDeduplicate").checked = !!p.deduplicate; $("qcRemoveSamples").checked = !!p.remove_samples;
+  $("qcMode").value = "profile_adaptive";
+  const estimate = recommendation.estimated_site_removal_fraction == null ? "无法估算" : `预计约 ${formatPercent(recommendation.estimated_site_removal_fraction)} 位点触发缺失率过滤`;
+  const candidates = recommendation.sample_exclusion_candidates || [];
+  $("qcRecommendationSummary").innerHTML = `<b>${escapeHtml(recommendation.profile_name || "当前Profile")}自适应方案</b> · ${estimate} · 高缺失候选样本 ${formatNumber(candidates.length)} 个。<br>${(recommendation.reasons || []).map(escapeHtml).join("；")}`;
+  if (p.normalize && $("qualityReferencePath").value.trim()) $("repairReferencePath").value = $("qualityReferencePath").value.trim();
+  updateQcMode();
+}
+
 function setQualityProgress(job) {
   const wrap = $("qualityProgress");
   wrap.classList.remove("hidden");
@@ -771,6 +814,7 @@ function renderQualityResult(job) {
     return;
   }
   const data = job.result, summary = data.summary, scan = data.scan;
+  applyQcRecommendation(data.qc_recommendation);
   const artifactLinks = (job.artifacts || []).map(x => {
     const open = x.name === "report.html" ? " target=\"_blank\"" : " download";
     const href = x.name === "report.html" ? `${x.url}&view=1` : x.url;
@@ -894,10 +938,16 @@ async function loadRepairCatalog() {
 
 function updateRepairFields() {
   const action = $("repairAction").value;
+  const isQc = action === "quality_control_copy";
   $("repairExecutorCard").querySelector(".repair-output-field").classList.toggle("hidden", action === "index");
-  $("repairExecutorCard").querySelector(".repair-reference-field").classList.toggle("hidden", action !== "normalize_copy");
+  $("repairExecutorCard").querySelector(".repair-reference-field").classList.toggle("hidden", action !== "normalize_copy" && !(isQc && $("qcNormalize").checked));
   $("repairExecutorCard").querySelector(".repair-expression-field").classList.toggle("hidden", !["filter_copy", "mask_genotypes_copy"].includes(action));
   $("repairExecutorCard").querySelector(".repair-samples-field").classList.toggle("hidden", action !== "subset_samples_copy");
+  $("repairExecutorCard").querySelector(".repair-qc-field").classList.toggle("hidden", !isQc);
+  if (isQc && !state.qcRecommendation) $("qcRecommendationSummary").innerHTML = "<b>尚无自适应参数。</b>请先运行上方质量评估；也可以切换为“使用者自定义”后手工设置。";
+  if (isQc && !$("repairOutputPath").value.trim() && currentPath()) {
+    $("repairOutputPath").value = currentPath().replace(/(?:\.vcf(?:\.gz|\.bgz)?|\.bcf)$/i, "") + ".CallVCF_QC.vcf.gz";
+  }
   if (action === "mask_genotypes_copy") {
     $("repairExpressionLabel").textContent = "要掩蔽为缺失的GT条件";
     $("repairExpression").placeholder = "例如：FMT/DP<5 || FMT/GQ<20";
@@ -908,7 +958,8 @@ function updateRepairFields() {
 }
 
 function renderRepairPlan(plan) {
-  $("repairResult").innerHTML = `<b>${escapeHtml(plan.action_name)}</b> · 风险：${escapeHtml(plan.risk)}<br>输入：${escapeHtml(plan.source)}<br>输出：${escapeHtml(plan.output || "仅生成索引旁文件")}<br><code>${escapeHtml((plan.command_preview || []).join(" "))}</code>`;
+  const qc = plan.qc_parameters ? `<br>质控模式：${escapeHtml(plan.qc_parameters.mode)}；位点缺失≤${escapeHtml(plan.qc_parameters.max_site_missing)}；GT DP=${escapeHtml(plan.qc_parameters.min_dp ?? "关闭")}–${escapeHtml(plan.qc_parameters.max_dp ?? "关闭")}；GQ≥${escapeHtml(plan.qc_parameters.min_gq ?? "关闭")}${plan.samples?.length ? `；候选排除样本 ${plan.samples.length} 个` : ""}` : "";
+  $("repairResult").innerHTML = `<b>${escapeHtml(plan.action_name)}</b> · 风险：${escapeHtml(plan.risk)}<br>输入：${escapeHtml(plan.source)}<br>输出：${escapeHtml(plan.output || "仅生成索引旁文件")}${qc}<br><code>${escapeHtml((plan.command_preview || []).join(" "))}</code>`;
 }
 
 async function executeRepair(plan, confirmation = "") {
@@ -920,9 +971,19 @@ async function executeRepair(plan, confirmation = "") {
 
 async function createRepairPlan() {
   try {
+    const action = $("repairAction").value;
+    if (action === "quality_control_copy" && $("qcMode").value === "profile_adaptive" && !state.qcRecommendation) throw new Error("请先运行质量评估以生成自适应参数，或切换为使用者自定义");
+    const qPayload = qualityPayload();
+    const sampleLimit = nullableNumber("qcMaxSampleMissing");
+    const excludeSamples = action === "quality_control_copy" && $("qcRemoveSamples").checked
+      ? (state.qualityRun?.result?.samples || []).filter(x => x.missing_rate != null && sampleLimit != null && x.missing_rate >= sampleLimit).map(x => x.sample_id)
+      : [];
     const plan = await api("/api/repair/plan", {
-      action: $("repairAction").value, path: currentPath(), output_path: $("repairOutputPath").value.trim(),
+      action, path: currentPath(), output_path: $("repairOutputPath").value.trim(),
       reference_path: $("repairReferencePath").value.trim(), expression: $("repairExpression").value.trim(), samples: $("repairSamples").value.trim(),
+      qc_parameters: action === "quality_control_copy" ? qcParametersPayload() : null,
+      exclude_samples: excludeSamples, quality_profile: qPayload.profile,
+      quality_inputs: {reference_path:qPayload.reference_path, sample_meta_path:qPayload.sample_meta_path, region_bed_path:qPayload.region_bed_path},
     });
     state.repairPlan = plan; renderRepairPlan(plan);
     if (plan.risk === "dangerous") showDangerRepairPolicy(plan);
@@ -934,7 +995,9 @@ async function pollRepair(planId) {
   clearTimeout(state.repairPoll);
   try {
     const job = await api("/api/repair/status", {plan_id: planId});
-    $("repairResult").innerHTML = `<b>${escapeHtml(job.message)}</b> · ${job.progress ?? 0}%${job.error ? `<br>${escapeHtml(job.error)}` : ""}${job.result ? `<br>输出：${escapeHtml(job.result.output_path || job.result.index_path)}<br>审计日志：${escapeHtml(job.result.audit_log)}${job.result.before_stats ? `<br>修复前后统计：${escapeHtml(job.result.before_stats)} · ${escapeHtml(job.result.after_stats)}<br>清单：${escapeHtml(job.result.manifest)}` : ""}` : ""}`;
+    const comparison = job.result?.qc_comparison;
+    const comparisonHtml = comparison ? `<div class="quality-summary"><div class="meta-card"><span>质控前评分</span><strong>${comparison.before.score}/100</strong></div><div class="meta-card"><span>质控后评分</span><strong>${comparison.after.score}/100</strong></div><div class="meta-card"><span>评分变化</span><strong>${comparison.change.score_delta >= 0 ? "+" : ""}${comparison.change.score_delta}</strong></div><div class="meta-card"><span>移除位点</span><strong>${formatNumber(comparison.change.records_removed)} · ${formatPercent(comparison.change.records_removed_fraction)}</strong></div></div><p><b>告警变化：</b>解决 ${comparison.change.resolved_warning_count}；新增 ${comparison.change.new_warning_count}；仍存在 ${comparison.change.persistent_warning_count}。</p><ul>${(comparison.further_recommendations || []).map(x => `<li>${escapeHtml(x)}</li>`).join("")}</ul><p>比较报告：${escapeHtml(job.result.qc_comparison_report)}<br>质控后完整报告：${escapeHtml(job.result.qc_after_report)}</p>` : "";
+    $("repairResult").innerHTML = `<b>${escapeHtml(job.message)}</b> · ${job.progress ?? 0}%${job.error ? `<br>${escapeHtml(job.error)}` : ""}${job.result ? `<br>输出：${escapeHtml(job.result.output_path || job.result.index_path)}<br>审计日志：${escapeHtml(job.result.audit_log)}${job.result.before_stats ? `<br>修复前后统计：${escapeHtml(job.result.before_stats)} · ${escapeHtml(job.result.after_stats)}<br>清单：${escapeHtml(job.result.manifest)}` : ""}${comparisonHtml}` : ""}`;
     if (["complete","failed","cancelled"].includes(job.status)) {
       $("repairPlanBtn").disabled = !state.repairCatalog?.available; $("repairCancelBtn").classList.add("hidden");
       toast(job.status === "complete" ? "安全修复已完成" : job.message, job.status !== "complete");
@@ -960,6 +1023,8 @@ function initEvents() {
   $("qualityProfile").addEventListener("change", applyQualityProfile);
   $("showRepairPolicyBtn").addEventListener("click", () => showDangerRepairPolicy());
   $("repairAction").addEventListener("change", updateRepairFields);
+  $("qcMode").addEventListener("change", updateQcMode);
+  $("qcNormalize").addEventListener("change", updateRepairFields);
   $("repairPlanBtn").addEventListener("click", createRepairPlan);
   $("repairCancelBtn").addEventListener("click", async () => {
     if (!state.repairPlan?.id) return;
@@ -1008,6 +1073,7 @@ document.addEventListener("DOMContentLoaded", () => {
   loadQualityCatalog();
   loadRepairCatalog();
   updateRepairFields();
+  updateQcMode();
   $("ldMode").dispatchEvent(new Event("change"));
   checkHealth();
 });
