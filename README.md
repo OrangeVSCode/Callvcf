@@ -89,8 +89,24 @@ ssh -L 8765:127.0.0.1:8765 user@server
    - 样本全局统计
    - Lead 位点高级分析
    - 样本 Lead-SNP 画像
+   - VCF 质量评估与报告
 
 样本统计留空位点列表时会扫描整个 VCF。对于数百万记录的文件，这一步可能需要数分钟。
+
+## VCF 质量评估与报告
+
+“VCF 质量评估”页签按文件、位点、样本和群体四层生成类似 MultiQC 的本地报告。当前内置通用二倍体动物、通用二倍体植物、自交植物/纯系、通用多倍体植物、棉花群体、棉花自交系和单倍体微生物 Profile，也可修改物种名、生物学倍性、亚基因组数量、繁殖方式及每一项阈值。
+
+生物学倍性与 VCF 的 GT 编码倍性分开设置。例如棉花在生物学上是异源四倍体，但很多 VCF 仍以 `0/0、0/1、1/1` 二倍体形式编码。GT 编码倍性默认自动识别，也可手工固定，避免产生假的倍性不符告警。
+
+扫描模式分为：
+
+- 智能抽样：遍历全部记录，准确统计总数、SNP/INDEL/SV 类型、FILTER 与染色体分布；跨全基因组确定性抽取目标数量位点展开逐样本 GT/DP/GQ/AD 评估。
+- 完整扫描：每条记录均进入逐样本指标计算，适合较小 VCF 或需要完整精度的场景。
+
+每次运行会生成独立目录和以下下载文件：`report.html`、`report_summary.json`、`sample_metrics.tsv`、`warnings.tsv`、`run_manifest.json` 和便携的 `CallVCF_QC_report.zip`。HTML 可离线打开，并通过浏览器打印或另存为 PDF。
+
+质量评估不会修改源 VCF。未来启用自动修复时，安全动作也只生成新文件；覆盖原文件、修改 REF/ALT/GT、坐标转换、染色体批量重命名或删除文件必须经过独立的二次确认窗口，且不会被静默执行。
 
 ## Lead 位点高级分析
 
@@ -168,6 +184,15 @@ python tests/real_compressed_smoke.py `
 ```
 
 该验收覆盖内容级 BGZF 识别、样本/contig 表头、SNP/INDEL/SV 分类、位点存在性、基因型分布、样本矩阵、样本统计、LD 和热图数据构建。
+
+质量评估引擎可再运行：
+
+```powershell
+python tests/real_quality_smoke.py `
+  --snp "D:\path\SNP.vcf.gz" `
+  --indel "D:\path\INDEL.vcf.gz" `
+  --sv "D:\path\SV.vcf.gz"
+```
 
 ## License
 

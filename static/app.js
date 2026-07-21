@@ -1,4 +1,4 @@
-const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null };
+const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null, qualityCatalog: null, qualityRun: null, qualityPoll: null };
 const $ = (id) => document.getElementById(id);
 const categoryOrder = ["HOM_REF", "HET", "HOM_ALT", "MISSING", "OTHER"];
 const shortLabels = { HOM_REF: "0/0", HET: "0/1", HOM_ALT: "1/1", MISSING: "缺失", OTHER: "其他" };
@@ -16,6 +16,7 @@ function formatBytes(n) {
 }
 
 function formatNumber(n) { return n == null ? "—" : Number(n).toLocaleString("zh-CN"); }
+function formatPercent(n) { return n == null ? "—" : `${(Number(n) * 100).toFixed(2)}%`; }
 
 function toast(message, error = false) {
   const el = $("toast");
@@ -685,6 +686,163 @@ async function runAction(action, button) {
   }
 }
 
+async function loadQualityCatalog() {
+  try {
+    const response = await fetch("/api/quality/catalog", {cache: "no-store"});
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) throw new Error(payload.error || "无法载入质量Profile");
+    state.qualityCatalog = payload.data;
+    const select = $("qualityProfile");
+    select.innerHTML = payload.data.profiles.map(x => `<option value="${escapeHtml(x.id)}">${escapeHtml(x.name)}</option>`).join("");
+    const saved = localStorage.getItem("callvcfQualityProfile");
+    select.value = payload.data.profiles.some(x => x.id === saved) ? saved : "cotton_inbred";
+    applyQualityProfile();
+    $("qualityOutputDir").placeholder = `默认：${payload.data.default_report_root}`;
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function applyQualityProfile() {
+  const profile = (state.qualityCatalog?.profiles || []).find(x => x.id === $("qualityProfile").value);
+  if (!profile) return;
+  $("qualityProfileNote").textContent = profile.notes || "";
+  $("qualityKingdom").value = profile.kingdom || "other";
+  $("qualityPloidy").value = profile.ploidy || 2;
+  $("qualityGenotypePloidy").value = String(profile.genotype_ploidy || "auto");
+  $("qualitySubgenomes").value = profile.subgenomes || 1;
+  $("qualityMating").value = profile.mating_system || "unknown";
+  localStorage.setItem("callvcfQualityProfile", profile.id);
+}
+
+function qualityPayload() {
+  const thresholds = {};
+  document.querySelectorAll("[data-qc-threshold]").forEach(input => {
+    if (input.value.trim() !== "") thresholds[input.dataset.qcThreshold] = input.value;
+  });
+  return {
+    path: currentPath(),
+    output_dir: $("qualityOutputDir").value.trim(),
+    scan_mode: $("qualityScanMode").value,
+    target_records: Number($("qualityTargetRecords").value || 200000),
+    profile: {
+      profile_id: $("qualityProfile").value,
+      species_name: $("qualitySpecies").value.trim(),
+      kingdom: $("qualityKingdom").value,
+      ploidy: Number($("qualityPloidy").value),
+      genotype_ploidy: $("qualityGenotypePloidy").value,
+      subgenomes: Number($("qualitySubgenomes").value),
+      mating_system: $("qualityMating").value,
+      thresholds,
+    },
+  };
+}
+
+function setQualityProgress(job) {
+  const wrap = $("qualityProgress");
+  wrap.classList.remove("hidden");
+  $("qualityProgressText").textContent = job.message || "正在运行";
+  const percent = job.progress == null ? null : Math.max(0, Math.min(100, Number(job.progress)));
+  $("qualityProgressValue").textContent = percent == null ? "扫描中" : `${percent.toFixed(1)}%`;
+  $("qualityProgressBar").style.width = percent == null ? "35%" : `${percent}%`;
+  $("qualityProgressBar").classList.toggle("indeterminate", percent == null);
+  $("qualityProcessed").textContent = `已处理 ${formatNumber(job.processed_records || 0)} 条记录 · 任务 ${job.id}`;
+}
+
+function renderQualityResult(job) {
+  const target = $("qualityResult");
+  if (job.status === "failed" || job.status === "cancelled") {
+    target.className = "result-body";
+    target.innerHTML = `<div class="missing-box"><b>${job.status === "cancelled" ? "评估已取消" : "评估失败"}</b><br>${escapeHtml(job.error || job.message || "未知错误")}</div>`;
+    return;
+  }
+  const data = job.result, summary = data.summary, scan = data.scan;
+  const artifactLinks = (job.artifacts || []).map(x => {
+    const open = x.name === "report.html" ? " target=\"_blank\"" : " download";
+    const href = x.name === "report.html" ? `${x.url}&view=1` : x.url;
+    return `<a class="artifact-link" href="${escapeHtml(href)}"${open}>${escapeHtml(x.name)} <small>${formatBytes(x.size)}</small></a>`;
+  }).join("");
+  const warnings = (data.warnings || []).slice(0, 200).map(x => ({
+    级别: `<span class="level-${escapeHtml(x.level)}">${escapeHtml(x.level.toUpperCase())}</span>`,
+    范围: x.scope, 对象: x.target, 问题: x.message, 证据: x.evidence, 建议: x.advice,
+  }));
+  const samples = (data.samples || []).map(x => ({
+    样本: x.sample_id, 缺失率: formatPercent(x.missing_rate), 杂合率: formatPercent(x.het_rate),
+    中位DP: x.median_dp ?? "—", 中位GQ: x.median_gq ?? "—", AB异常: formatPercent(x.ab_outlier_rate),
+    倍性不符: formatPercent(x.ploidy_mismatch_rate),
+  }));
+  target.className = "result-body";
+  target.innerHTML = `<div class="quality-summary">
+    <div class="meta-card"><span>质量分</span><strong>${summary.score}/100</strong></div>
+    <div class="meta-card"><span>记录数</span><strong>${formatNumber(summary.record_count)}</strong></div>
+    <div class="meta-card"><span>评估位点</span><strong>${formatNumber(scan.evaluated_records)}</strong></div>
+    <div class="meta-card"><span>Critical</span><strong>${formatNumber(summary.critical_count)}</strong></div>
+    <div class="meta-card"><span>Warning</span><strong>${formatNumber(summary.warning_count)}</strong></div>
+  </div>
+  <div class="notice"><b>${escapeHtml(data.profile.name)}</b> · 生物学倍性 ${data.profile.ploidy} · GT编码倍性 ${data.profile.effective_gt_ploidy ?? "未识别"} · ${scan.mode === "full" ? "完整扫描" : `智能抽样 ${formatPercent(scan.sampling_fraction)}`} · ${escapeHtml(scan.method_note)}</div>
+  <div class="quality-section"><h4>报告下载</h4><div class="artifact-list">${artifactLinks}</div><small>HTML可离线交互和打印为PDF；ZIP包含HTML、JSON、TSV与运行审计文件。</small></div>
+  <div class="quality-section"><h4>告警明细（页面最多显示200条，完整内容见 warnings.tsv）</h4>${genericTable(warnings, ["级别","范围","对象","问题","证据","建议"])}</div>
+  <div class="quality-section"><h4>样本指标</h4>${genericTable(samples, ["样本","缺失率","杂合率","中位DP","中位GQ","AB异常","倍性不符"])}</div>`;
+}
+
+async function pollQuality(runId) {
+  clearTimeout(state.qualityPoll);
+  try {
+    const job = await api("/api/quality/status", {run_id: runId});
+    state.qualityRun = job;
+    setQualityProgress(job);
+    if (["complete", "failed", "cancelled"].includes(job.status)) {
+      $("qualityRunBtn").disabled = false;
+      $("qualityRunBtn").textContent = "重新评估";
+      $("qualityCancelBtn").classList.add("hidden");
+      renderQualityResult(job);
+      if (job.status === "complete") toast("VCF质量报告已生成");
+      return;
+    }
+    state.qualityPoll = setTimeout(() => pollQuality(runId), 900);
+  } catch (error) {
+    $("qualityRunBtn").disabled = false;
+    $("qualityCancelBtn").classList.add("hidden");
+    toast(error.message, true);
+  }
+}
+
+async function runQualityAssessment() {
+  try {
+    const button = $("qualityRunBtn");
+    button.disabled = true; button.textContent = "正在启动…";
+    $("qualityCancelBtn").classList.remove("hidden");
+    $("qualityResult").className = "result-body loading";
+    $("qualityResult").textContent = "正在创建质量评估任务…";
+    const job = await api("/api/quality/start", qualityPayload());
+    state.qualityRun = job;
+    button.textContent = "评估中…";
+    setQualityProgress(job);
+    pollQuality(job.id);
+  } catch (error) {
+    $("qualityRunBtn").disabled = false; $("qualityRunBtn").textContent = "开始评估";
+    $("qualityCancelBtn").classList.add("hidden");
+    $("qualityResult").className = "result-body empty-state";
+    $("qualityResult").textContent = "尚未运行质量评估。";
+    toast(error.message, true);
+  }
+}
+
+async function cancelQualityAssessment() {
+  if (!state.qualityRun?.id) return;
+  try { await api("/api/quality/cancel", {run_id: state.qualityRun.id}); toast("正在取消质量评估"); }
+  catch (error) { toast(error.message, true); }
+}
+
+function showDangerRepairPolicy() {
+  $("dangerConfirmText").value = "";
+  $("dangerConfirmBtn").disabled = true;
+  $("dangerRepairModal").classList.remove("hidden");
+  $("dangerConfirmText").focus();
+}
+
+function closeDangerRepairPolicy() { $("dangerRepairModal").classList.add("hidden"); }
+
 function initEvents() {
   $("selectFileBtn").addEventListener("click", selectLocalFile);
   $("shutdownBtn").addEventListener("click", shutdownLocal);
@@ -696,6 +854,14 @@ function initEvents() {
   $("sampleSuggestions").addEventListener("click", e => { const btn = e.target.closest("[data-sample]"); if (btn) toggleSample(btn.dataset.sample); });
   $("leadRunBtn").addEventListener("click", runLeadAnalysis);
   $("sampleLeadRunBtn").addEventListener("click", runSampleLeadProfile);
+  $("qualityRunBtn").addEventListener("click", runQualityAssessment);
+  $("qualityCancelBtn").addEventListener("click", cancelQualityAssessment);
+  $("qualityProfile").addEventListener("change", applyQualityProfile);
+  $("showRepairPolicyBtn").addEventListener("click", showDangerRepairPolicy);
+  $("dangerCancelBtn").addEventListener("click", closeDangerRepairPolicy);
+  $("dangerConfirmText").addEventListener("input", e => { $("dangerConfirmBtn").disabled = e.target.value.trim() !== "我已核对目标文件"; });
+  $("dangerConfirmBtn").addEventListener("click", () => { closeDangerRepairPolicy(); toast("二次确认规则已启用；本次未执行任何修复"); });
+  $("dangerRepairModal").addEventListener("click", e => { if (e.target === $("dangerRepairModal")) closeDangerRepairPolicy(); });
   $("ldMode").addEventListener("change", () => {
     const multi = $("ldMode").value === "multi_lead_region";
     document.querySelectorAll(".multi-lead-field").forEach(x => x.classList.toggle("hidden", !multi));
@@ -726,6 +892,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initEvents();
   restoreAdvancedSettings();
   loadToolStatus();
+  loadQualityCatalog();
   $("ldMode").dispatchEvent(new Event("change"));
   checkHealth();
 });

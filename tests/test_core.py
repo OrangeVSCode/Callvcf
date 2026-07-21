@@ -12,6 +12,8 @@ from vcf_service import classify_variant, detect_compression, genotype_alleles, 
 from vcf_service import PurePythonVCFService
 from advanced_analysis import AdvancedAnalyzer, genotype_dosage, pairwise_r2, pairwise_dprime, parse_region, parse_trait_directions
 from tool_manager import tools_status
+from quality_engine import QualityEvaluator, QualityJobManager, render_report
+from quality_profiles import resolve_profile
 
 
 def bgzf_block(data):
@@ -180,6 +182,52 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(metadata["storage"], "BGZF VCF（压缩直读）")
             self.assertEqual(metadata["sample_count"], 4)
             self.assertTrue(service.check_loci(str(compressed), "1:300")["results"][0]["exists"])
+
+    def test_quality_profiles_and_report(self):
+        profile = resolve_profile({
+            "profile_id": "cotton_inbred", "species_name": "陆地棉",
+            "thresholds": {"sample_missing_warn": 0.03},
+        })
+        self.assertEqual(profile["ploidy"], 4)
+        self.assertEqual(profile["subgenomes"], 2)
+        self.assertEqual(profile["thresholds"]["sample_missing_warn"], 0.03)
+        self.assertEqual(profile["threshold_sources"]["sample_missing_warn"], "用户自定义")
+        self.assertFalse(profile["interpretation"]["hwe_enabled"])
+
+        fixtures = Path(__file__).resolve().parent / "fixtures"
+        evaluator = QualityEvaluator(PurePythonVCFService())
+        result = evaluator.evaluate(str(fixtures / "tiny.vcf"), {
+            "profile": {"profile_id": "generic_diploid_plant"},
+            "scan_mode": "full",
+        })
+        self.assertEqual(result["summary"]["record_count"], 3)
+        self.assertEqual(result["summary"]["sample_count"], 4)
+        self.assertEqual(result["scan"]["evaluated_records"], 3)
+        self.assertTrue(result["repair_policy"]["dangerous_requires_second_confirmation"])
+        self.assertEqual(result["samples"][0]["missing_rate"], 0.0)
+        report = render_report(result)
+        self.assertIn("VCF质量评估报告", report)
+        self.assertIn("打印/另存为PDF", report)
+        self.assertNotIn("&quot;schema_version&quot;", report)
+
+    def test_quality_job_artifacts(self):
+        fixtures = Path(__file__).resolve().parent / "fixtures"
+        with tempfile.TemporaryDirectory(prefix="callvcf-qc-") as temp_name:
+            manager = QualityJobManager(PurePythonVCFService())
+            job = manager.start({
+                "path": str(fixtures / "tiny.vcf"), "output_dir": temp_name,
+                "profile": {"profile_id": "plant_inbred"}, "scan_mode": "full",
+            })
+            for _ in range(100):
+                current = manager.status(job["id"])
+                if current["status"] in {"complete", "failed", "cancelled"}:
+                    break
+                import time
+                time.sleep(0.02)
+            self.assertEqual(current["status"], "complete", current.get("error"))
+            names = {x["name"] for x in current["artifacts"]}
+            self.assertTrue({"report.html", "report_summary.json", "sample_metrics.tsv", "warnings.tsv", "run_manifest.json", "CallVCF_QC_report.zip"}.issubset(names))
+            self.assertTrue(manager.artifact(job["id"], "report.html").is_file())
 
 
 if __name__ == "__main__":

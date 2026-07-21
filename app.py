@@ -8,10 +8,11 @@ import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from vcf_service import VCFError, create_service
 from advanced_analysis import AdvancedAnalyzer
+from quality_engine import QualityJobManager
 from tool_manager import install_tool, tools_status
 
 
@@ -19,6 +20,7 @@ ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 STATIC_DIR = ROOT / "static"
 SERVICE = None
 ADVANCED = None
+QUALITY = None
 
 
 def select_local_file(initial_dir=None):
@@ -119,6 +121,25 @@ class Handler(BaseHTTPRequestHandler):
             })
         if parsed.path == "/api/tools/status":
             return self._json(200, {"ok": True, "data": tools_status()})
+        if parsed.path == "/api/quality/catalog":
+            return self._json(200, {"ok": True, "data": QUALITY.catalog()})
+        if parsed.path == "/api/quality/artifact":
+            try:
+                query = parse_qs(parsed.query)
+                path = QUALITY.artifact((query.get("run_id") or [""])[0], (query.get("name") or [""])[0])
+                body = path.read_bytes()
+                mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+                self.send_response(200)
+                self.send_header("Content-Type", mime + ("; charset=utf-8" if mime.startswith("text/") or mime == "application/json" else ""))
+                disposition = "inline" if (query.get("view") or [""])[0] == "1" and path.suffix.lower() == ".html" else "attachment"
+                self.send_header("Content-Disposition", "{}; filename=\"{}\"".format(disposition, path.name))
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            except VCFError as exc:
+                return self._json(404, {"ok": False, "error": str(exc)})
         relative = "index.html" if parsed.path in {"", "/"} else unquote(parsed.path.lstrip("/"))
         candidate = (STATIC_DIR / relative).resolve()
         if STATIC_DIR not in candidate.parents and candidate != STATIC_DIR:
@@ -172,6 +193,12 @@ class Handler(BaseHTTPRequestHandler):
                 result = ADVANCED.sample_lead_profile(payload)
             elif route == "/api/tools/install":
                 result = install_tool(payload.get("tool"))
+            elif route == "/api/quality/start":
+                result = QUALITY.start(payload)
+            elif route == "/api/quality/status":
+                result = QUALITY.status(payload.get("run_id"))
+            elif route == "/api/quality/cancel":
+                result = QUALITY.cancel(payload.get("run_id"))
             else:
                 return self._json(404, {"ok": False, "error": "接口不存在"})
             return self._json(200, {"ok": True, "data": result})
@@ -189,9 +216,10 @@ def main():
     parser.add_argument("--bcftools", default=os.environ.get("BCFTOOLS"))
     args = parser.parse_args()
 
-    global SERVICE, ADVANCED
+    global SERVICE, ADVANCED, QUALITY
     SERVICE = create_service(args.bcftools)
     ADVANCED = AdvancedAnalyzer(SERVICE)
+    QUALITY = QualityJobManager(SERVICE)
     server = AppServer((args.host, args.port), Handler)
     print("VCF Query Tool: http://{}:{}".format(args.host, args.port), flush=True)
     try:
