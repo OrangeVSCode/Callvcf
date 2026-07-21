@@ -156,6 +156,17 @@ tabix -p vcf input.vcf.gz
 python3 -m unittest discover -s tests -v
 ```
 
+若本机有大型真实 SNP、INDEL、SV 压缩 VCF，可运行只读验收脚本。脚本只把首个 contig 中最多 400 条记录写成临时 `.vcf.gz`，完成后自动删除，不会生成整份解压文件：
+
+```powershell
+python tests/real_compressed_smoke.py `
+  --snp "D:\path\SNP.vcf.gz" `
+  --indel "D:\path\INDEL.vcf.gz" `
+  --sv "D:\path\SV.vcf.gz"
+```
+
+该验收覆盖内容级 BGZF 识别、样本/contig 表头、SNP/INDEL/SV 分类、位点存在性、基因型分布、样本矩阵、样本统计、LD 和热图数据构建。
+
 ## License
 
 MIT
