@@ -3,6 +3,8 @@ import argparse
 import json
 import mimetypes
 import os
+import shutil
+import subprocess
 import sys
 import threading
 import traceback
@@ -13,6 +15,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from vcf_service import VCFError, create_service
 from advanced_analysis import AdvancedAnalyzer
 from quality_engine import QualityJobManager
+from repair_engine import RepairExecutor
 from tool_manager import install_tool, tools_status
 
 
@@ -21,6 +24,44 @@ STATIC_DIR = ROOT / "static"
 SERVICE = None
 ADVANCED = None
 QUALITY = None
+REPAIR = None
+
+
+def _windows_dialog(kind="file", initial_dir=None):
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        raise VCFError("当前环境缺少tkinter和Windows文件选择器；请直接粘贴路径")
+    env = os.environ.copy()
+    env["CALLVCF_DIALOG_INITIAL"] = str(initial_dir or "")
+    filters = {
+        "vcf": "Variant files|*.vcf;*.vcf.gz;*.vcf.bgz;*.bcf|All files|*.*",
+        "gff": "Gene annotation|*.gff;*.gff3;*.gtf;*.gff.gz;*.gff3.gz;*.gtf.gz|All files|*.*",
+        "annotation": "Annotation table|*.tsv;*.csv;*.txt;*.gz|All files|*.*",
+        "domain": "Domain table|*.tsv;*.csv;*.txt;*.gz|All files|*.*",
+        "phenotype": "Phenotype PS|*.ps|All files|*.*",
+        "reference": "Reference FASTA|*.fa;*.fasta;*.fna;*.fa.gz;*.fasta.gz|All files|*.*",
+        "executable": "Executable|*.exe|All files|*.*",
+        "file": "All files|*.*",
+    }
+    if kind in {"directory", "phenotype_dir", "output_dir"}:
+        script = "$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Windows.Forms;$d=New-Object System.Windows.Forms.FolderBrowserDialog;if($env:CALLVCF_DIALOG_INITIAL){$d.SelectedPath=$env:CALLVCF_DIALOG_INITIAL};if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){[Console]::OutputEncoding=[Text.Encoding]::UTF8;$d.SelectedPath}"
+    elif kind == "repair_output":
+        env["CALLVCF_DIALOG_FILTER"] = "Compressed VCF|*.vcf.gz|BGZF VCF|*.vcf.bgz"
+        script = "$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Windows.Forms;$d=New-Object System.Windows.Forms.SaveFileDialog;$d.Filter=$env:CALLVCF_DIALOG_FILTER;$d.DefaultExt='vcf.gz';$d.AddExtension=$true;$d.OverwritePrompt=$true;if($env:CALLVCF_DIALOG_INITIAL){$d.InitialDirectory=$env:CALLVCF_DIALOG_INITIAL};if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){[Console]::OutputEncoding=[Text.Encoding]::UTF8;$d.FileName}"
+    else:
+        env["CALLVCF_DIALOG_FILTER"] = filters.get(kind, filters["file"])
+        script = "$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Windows.Forms;$d=New-Object System.Windows.Forms.OpenFileDialog;$d.Filter=$env:CALLVCF_DIALOG_FILTER;$d.Multiselect=$false;if($env:CALLVCF_DIALOG_INITIAL){$d.InitialDirectory=$env:CALLVCF_DIALOG_INITIAL};if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){[Console]::OutputEncoding=[Text.Encoding]::UTF8;$d.FileName}"
+    try:
+        proc = subprocess.run(
+            [powershell, "-NoProfile", "-STA", "-Command", script], env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        raise VCFError("文件选择窗口等待超时")
+    if proc.returncode:
+        raise VCFError((proc.stderr or "Windows文件选择器启动失败").strip()[-1000:])
+    return proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else None
 
 
 def select_local_file(initial_dir=None):
@@ -28,7 +69,7 @@ def select_local_file(initial_dir=None):
         import tkinter as tk
         from tkinter import filedialog
     except ImportError:
-        raise VCFError("当前 Python 未包含 tkinter；请直接粘贴 VCF 文件路径")
+        return {"path": _windows_dialog("vcf", initial_dir)}
     root = tk.Tk()
     root.withdraw()
     try:
@@ -54,7 +95,7 @@ def select_resource(kind="file", initial_dir=None):
         import tkinter as tk
         from tkinter import filedialog
     except ImportError:
-        raise VCFError("当前 Python 未包含 tkinter，请直接粘贴资源路径")
+        return {"path": _windows_dialog(kind, initial_dir)}
     root = tk.Tk()
     root.withdraw()
     try:
@@ -62,6 +103,11 @@ def select_resource(kind="file", initial_dir=None):
         kwargs = {"initialdir": initial_dir if initial_dir and Path(initial_dir).is_dir() else None}
         if kind in {"directory", "phenotype_dir", "output_dir"}:
             path = filedialog.askdirectory(title="选择目录", **kwargs)
+        elif kind == "repair_output":
+            path = filedialog.asksaveasfilename(
+                title="选择新的VCF.GZ输出（不会覆盖已有文件）", defaultextension=".vcf.gz",
+                filetypes=[("Compressed VCF", "*.vcf.gz"), ("BGZF VCF", "*.vcf.bgz")], **kwargs
+            )
         else:
             filters = {
                 "gff": [("Gene annotation", "*.gff *.gff3 *.gtf *.gff.gz *.gff3.gz *.gtf.gz"), ("All files", "*.*")],
@@ -69,6 +115,7 @@ def select_resource(kind="file", initial_dir=None):
                 "domain": [("Domain table", "*.tsv *.csv *.txt *.gz"), ("All files", "*.*")],
                 "phenotype": [("Phenotype PS", "*.ps"), ("All files", "*.*")],
                 "executable": [("Executable", "*.exe *"), ("All files", "*.*")],
+                "reference": [("Reference FASTA", "*.fa *.fasta *.fna *.fa.gz *.fasta.gz"), ("All files", "*.*")],
             }
             path = filedialog.askopenfilename(title="选择资源文件", filetypes=filters.get(kind, [("All files", "*.*")]), **kwargs)
     finally:
@@ -123,6 +170,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "data": tools_status()})
         if parsed.path == "/api/quality/catalog":
             return self._json(200, {"ok": True, "data": QUALITY.catalog()})
+        if parsed.path == "/api/repair/catalog":
+            return self._json(200, {"ok": True, "data": REPAIR.catalog()})
         if parsed.path == "/api/quality/artifact":
             try:
                 query = parse_qs(parsed.query)
@@ -199,6 +248,14 @@ class Handler(BaseHTTPRequestHandler):
                 result = QUALITY.status(payload.get("run_id"))
             elif route == "/api/quality/cancel":
                 result = QUALITY.cancel(payload.get("run_id"))
+            elif route == "/api/repair/plan":
+                result = REPAIR.plan(payload)
+            elif route == "/api/repair/execute":
+                result = REPAIR.execute(payload)
+            elif route == "/api/repair/status":
+                result = REPAIR.status(payload.get("plan_id"))
+            elif route == "/api/repair/cancel":
+                result = REPAIR.cancel(payload.get("plan_id"))
             else:
                 return self._json(404, {"ok": False, "error": "接口不存在"})
             return self._json(200, {"ok": True, "data": result})
@@ -216,10 +273,11 @@ def main():
     parser.add_argument("--bcftools", default=os.environ.get("BCFTOOLS"))
     args = parser.parse_args()
 
-    global SERVICE, ADVANCED, QUALITY
+    global SERVICE, ADVANCED, QUALITY, REPAIR
     SERVICE = create_service(args.bcftools)
     ADVANCED = AdvancedAnalyzer(SERVICE)
     QUALITY = QualityJobManager(SERVICE)
+    REPAIR = RepairExecutor(SERVICE)
     server = AppServer((args.host, args.port), Handler)
     print("VCF Query Tool: http://{}:{}".format(args.host, args.port), flush=True)
     try:

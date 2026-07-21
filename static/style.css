@@ -216,6 +216,12 @@ summary { padding: 10px 16px; color: var(--brand); font-size: 12px; font-weight:
 .quality-config-card { padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: #fbfdfc; }
 .quality-config-card h4 { margin: 0 0 14px; font-size: 17px; }
 .quality-config-card summary { cursor: pointer; color: var(--brand-dark); font-weight: 750; }
+.module-check-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:12px 0; }
+.module-check-grid label { display:flex; gap:10px; align-items:flex-start; padding:13px; border:1px solid var(--line); border-radius:12px; background:white; cursor:pointer; }
+.module-check-grid input { margin-top:3px; accent-color:var(--brand); }
+.module-check-grid b,.module-check-grid small { display:block; }
+.module-check-grid small { margin-top:4px; color:var(--muted); line-height:1.35; }
+.compact-grid { margin-top:12px; }
 .threshold-grid { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 12px; margin-top: 14px; }
 .safety-card { display: flex; align-items: center; justify-content: space-between; gap: 24px; border-left: 4px solid #c98416; }
 .safety-card p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
@@ -250,6 +256,7 @@ summary { padding: 10px 16px; color: var(--brand); font-size: 12px; font-weight:
   .distribution-grid, .stats-grid { grid-template-columns: 1fr; }
   .advanced-grid, .lead-summary { grid-template-columns: repeat(2, 1fr); }
   .option-grid { grid-template-columns: repeat(2, 1fr); }
+  .module-check-grid { grid-template-columns: repeat(2, 1fr); }
   .threshold-grid { grid-template-columns: repeat(2, 1fr); }
   .quality-summary { grid-template-columns: repeat(3, 1fr); }
 }
@@ -266,7 +273,7 @@ summary { padding: 10px 16px; color: var(--brand); font-size: 12px; font-weight:
   .tabs { align-items: stretch; }
   .run-btn { width: 100%; }
   .count-grid { grid-template-columns: repeat(3, 1fr); }
-  .advanced-grid, .option-grid, .resource-grid, .lead-summary, .result-split { grid-template-columns: 1fr; }
+  .advanced-grid, .option-grid, .resource-grid, .lead-summary, .result-split, .module-check-grid { grid-template-columns: 1fr; }
   .resource-input, .resource-input.triple { grid-template-columns: 1fr; }
   .threshold-grid, .quality-summary { grid-template-columns: 1fr 1fr; }
   .safety-card { align-items: stretch; flex-direction: column; }

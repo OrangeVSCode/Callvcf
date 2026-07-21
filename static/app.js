@@ -1,4 +1,4 @@
-const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null, qualityCatalog: null, qualityRun: null, qualityPoll: null };
+const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null, qualityCatalog: null, qualityRun: null, qualityPoll: null, repairCatalog: null, repairPlan: null, repairPoll: null };
 const $ = (id) => document.getElementById(id);
 const categoryOrder = ["HOM_REF", "HET", "HOM_ALT", "MISSING", "OTHER"];
 const shortLabels = { HOM_REF: "0/0", HET: "0/1", HOM_ALT: "1/1", MISSING: "缺失", OTHER: "其他" };
@@ -725,6 +725,16 @@ function qualityPayload() {
     output_dir: $("qualityOutputDir").value.trim(),
     scan_mode: $("qualityScanMode").value,
     target_records: Number($("qualityTargetRecords").value || 200000),
+    population_options: {
+      hwe: $("populationHwe").checked,
+      pca: $("populationPca").checked,
+      kinship: $("populationKinship").checked,
+      ld: $("populationLd").checked,
+      roh: $("populationRoh").checked,
+      site_missing: Number($("populationSiteMissing").value || 0.10),
+      ld_max_markers: Number($("populationLdMarkers").value || 5000),
+      ld_window_kb: Number($("populationLdWindow").value || 1000),
+    },
     profile: {
       profile_id: $("qualityProfile").value,
       species_name: $("qualitySpecies").value.trim(),
@@ -771,6 +781,14 @@ function renderQualityResult(job) {
     中位DP: x.median_dp ?? "—", 中位GQ: x.median_gq ?? "—", AB异常: formatPercent(x.ab_outlier_rate),
     倍性不符: formatPercent(x.ploidy_mismatch_rate),
   }));
+  const moduleLabels = {hwe:"HWE", pca:"PCA", kinship:"亲缘关系/IBD", ld:"LD衰减", roh:"ROH"};
+  const populationRows = Object.entries(data.population_analysis?.modules || {}).map(([key, value]) => ({
+    模块: moduleLabels[key] || key,
+    状态: value.status,
+    解释口径: value.interpretation,
+    摘要: value.error || Object.entries(value.summary || {}).map(([k,v]) => `${k}=${v ?? "—"}`).join("；"),
+    文件: (value.artifacts || []).join("、") || "—",
+  }));
   target.className = "result-body";
   target.innerHTML = `<div class="quality-summary">
     <div class="meta-card"><span>质量分</span><strong>${summary.score}/100</strong></div>
@@ -780,6 +798,7 @@ function renderQualityResult(job) {
     <div class="meta-card"><span>Warning</span><strong>${formatNumber(summary.warning_count)}</strong></div>
   </div>
   <div class="notice"><b>${escapeHtml(data.profile.name)}</b> · 生物学倍性 ${data.profile.ploidy} · GT编码倍性 ${data.profile.effective_gt_ploidy ?? "未识别"} · ${scan.mode === "full" ? "完整扫描" : `智能抽样 ${formatPercent(scan.sampling_fraction)}`} · ${escapeHtml(scan.method_note)}</div>
+  <div class="quality-section"><h4>HWE、PCA、亲缘关系、LD与ROH</h4><p class="sub">HWE按物种Profile解释；棉花/自交/多倍体只做描述。亲缘关系为PLINK 1.9 IBD/PI_HAT，其余模块默认不参与质量扣分。</p>${genericTable(populationRows, ["模块","状态","解释口径","摘要","文件"])}</div>
   <div class="quality-section"><h4>报告下载</h4><div class="artifact-list">${artifactLinks}</div><small>HTML可离线交互和打印为PDF；ZIP包含HTML、JSON、TSV与运行审计文件。</small></div>
   <div class="quality-section"><h4>告警明细（页面最多显示200条，完整内容见 warnings.tsv）</h4>${genericTable(warnings, ["级别","范围","对象","问题","证据","建议"])}</div>
   <div class="quality-section"><h4>样本指标</h4>${genericTable(samples, ["样本","缺失率","杂合率","中位DP","中位GQ","AB异常","倍性不符"])}</div>`;
@@ -834,14 +853,84 @@ async function cancelQualityAssessment() {
   catch (error) { toast(error.message, true); }
 }
 
-function showDangerRepairPolicy() {
+function showDangerRepairPolicy(plan = null) {
+  state.repairPlan = plan;
   $("dangerConfirmText").value = "";
-  $("dangerConfirmBtn").disabled = true;
+  if (plan) {
+    $("dangerRepairTitle").textContent = "危险修复必须二次确认";
+    $("dangerPlanSummary").innerHTML = `<b>${escapeHtml(plan.action_name)}</b><br>输入：${escapeHtml(plan.source)}<br>输出：${escapeHtml(plan.output || "—")}<br>命令：${escapeHtml((plan.command_preview || []).join(" "))}`;
+    $("dangerConfirmLabel").textContent = `请输入：${plan.confirmation_phrase}`;
+    $("dangerConfirmBtn").textContent = "确认并执行";
+    $("dangerConfirmBtn").disabled = true;
+  } else {
+    $("dangerRepairTitle").textContent = "自动修复安全规则";
+    $("dangerPlanSummary").innerHTML = "<b>永不支持：</b>覆盖原VCF或已有目标、删除文件、静默改写GT。标准化和过滤必须逐次生成计划并输入本次专属短语。";
+    $("dangerConfirmLabel").textContent = "此窗口仅说明规则，无修复计划";
+    $("dangerConfirmBtn").textContent = "关闭";
+    $("dangerConfirmBtn").disabled = false;
+  }
   $("dangerRepairModal").classList.remove("hidden");
-  $("dangerConfirmText").focus();
+  if (plan) $("dangerConfirmText").focus();
 }
 
 function closeDangerRepairPolicy() { $("dangerRepairModal").classList.add("hidden"); }
+
+async function loadRepairCatalog() {
+  try {
+    const response = await fetch("/api/repair/catalog", {cache:"no-store"});
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) throw new Error(payload.error || "无法检测修复后端");
+    state.repairCatalog = payload.data;
+    $("repairAvailability").textContent = payload.data.available
+      ? `bcftools已就绪：${payload.data.backend}。所有副本操作均写入新文件。`
+      : "未检测到bcftools：修复执行器不可用；质量评估与PLINK群体分析不受影响。";
+    $("repairPlanBtn").disabled = !payload.data.available;
+  } catch (error) { $("repairAvailability").textContent = error.message; $("repairPlanBtn").disabled = true; }
+}
+
+function updateRepairFields() {
+  const action = $("repairAction").value;
+  $("repairExecutorCard").querySelector(".repair-output-field").classList.toggle("hidden", action === "index");
+  $("repairExecutorCard").querySelector(".repair-reference-field").classList.toggle("hidden", action !== "normalize_copy");
+  $("repairExecutorCard").querySelector(".repair-expression-field").classList.toggle("hidden", action !== "filter_copy");
+}
+
+function renderRepairPlan(plan) {
+  $("repairResult").innerHTML = `<b>${escapeHtml(plan.action_name)}</b> · 风险：${escapeHtml(plan.risk)}<br>输入：${escapeHtml(plan.source)}<br>输出：${escapeHtml(plan.output || "仅生成索引旁文件")}<br><code>${escapeHtml((plan.command_preview || []).join(" "))}</code>`;
+}
+
+async function executeRepair(plan, confirmation = "") {
+  closeDangerRepairPolicy();
+  const job = await api("/api/repair/execute", {plan_id: plan.id, confirmation});
+  $("repairPlanBtn").disabled = true; $("repairCancelBtn").classList.remove("hidden");
+  pollRepair(job.id);
+}
+
+async function createRepairPlan() {
+  try {
+    const plan = await api("/api/repair/plan", {
+      action: $("repairAction").value, path: currentPath(), output_path: $("repairOutputPath").value.trim(),
+      reference_path: $("repairReferencePath").value.trim(), expression: $("repairExpression").value.trim(),
+    });
+    state.repairPlan = plan; renderRepairPlan(plan);
+    if (plan.risk === "dangerous") showDangerRepairPolicy(plan);
+    else if (window.confirm(`核对完成后执行“${plan.action_name}”？\n原VCF不会被覆盖。`)) await executeRepair(plan);
+  } catch (error) { toast(error.message, true); }
+}
+
+async function pollRepair(planId) {
+  clearTimeout(state.repairPoll);
+  try {
+    const job = await api("/api/repair/status", {plan_id: planId});
+    $("repairResult").innerHTML = `<b>${escapeHtml(job.message)}</b> · ${job.progress ?? 0}%${job.error ? `<br>${escapeHtml(job.error)}` : ""}${job.result ? `<br>输出：${escapeHtml(job.result.output_path || job.result.index_path)}<br>审计日志：${escapeHtml(job.result.audit_log)}` : ""}`;
+    if (["complete","failed","cancelled"].includes(job.status)) {
+      $("repairPlanBtn").disabled = !state.repairCatalog?.available; $("repairCancelBtn").classList.add("hidden");
+      toast(job.status === "complete" ? "安全修复已完成" : job.message, job.status !== "complete");
+      return;
+    }
+    state.repairPoll = setTimeout(() => pollRepair(planId), 800);
+  } catch (error) { toast(error.message, true); }
+}
 
 function initEvents() {
   $("selectFileBtn").addEventListener("click", selectLocalFile);
@@ -857,10 +946,22 @@ function initEvents() {
   $("qualityRunBtn").addEventListener("click", runQualityAssessment);
   $("qualityCancelBtn").addEventListener("click", cancelQualityAssessment);
   $("qualityProfile").addEventListener("change", applyQualityProfile);
-  $("showRepairPolicyBtn").addEventListener("click", showDangerRepairPolicy);
+  $("showRepairPolicyBtn").addEventListener("click", () => showDangerRepairPolicy());
+  $("repairAction").addEventListener("change", updateRepairFields);
+  $("repairPlanBtn").addEventListener("click", createRepairPlan);
+  $("repairCancelBtn").addEventListener("click", async () => {
+    if (!state.repairPlan?.id) return;
+    try { await api("/api/repair/cancel", {plan_id: state.repairPlan.id}); } catch (error) { toast(error.message, true); }
+  });
   $("dangerCancelBtn").addEventListener("click", closeDangerRepairPolicy);
-  $("dangerConfirmText").addEventListener("input", e => { $("dangerConfirmBtn").disabled = e.target.value.trim() !== "我已核对目标文件"; });
-  $("dangerConfirmBtn").addEventListener("click", () => { closeDangerRepairPolicy(); toast("二次确认规则已启用；本次未执行任何修复"); });
+  $("dangerConfirmText").addEventListener("input", e => {
+    $("dangerConfirmBtn").disabled = !!state.repairPlan && e.target.value.trim() !== state.repairPlan.confirmation_phrase;
+  });
+  $("dangerConfirmBtn").addEventListener("click", async () => {
+    if (!state.repairPlan) return closeDangerRepairPolicy();
+    try { await executeRepair(state.repairPlan, $("dangerConfirmText").value.trim()); }
+    catch (error) { toast(error.message, true); }
+  });
   $("dangerRepairModal").addEventListener("click", e => { if (e.target === $("dangerRepairModal")) closeDangerRepairPolicy(); });
   $("ldMode").addEventListener("change", () => {
     const multi = $("ldMode").value === "multi_lead_region";
@@ -893,6 +994,8 @@ document.addEventListener("DOMContentLoaded", () => {
   restoreAdvancedSettings();
   loadToolStatus();
   loadQualityCatalog();
+  loadRepairCatalog();
+  updateRepairFields();
   $("ldMode").dispatchEvent(new Event("change"));
   checkHealth();
 });

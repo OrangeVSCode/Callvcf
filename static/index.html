@@ -226,9 +226,37 @@
               <label class="field"><span>HWE P阈值</span><input data-qc-threshold="hwe_p_warn" type="number" min="0" max="1" step="any" placeholder="Profile/不适用"></label>
             </div>
           </details>
+          <section class="quality-config-card">
+            <h4>群体遗传分析模块</h4>
+            <p class="sub">使用内置PLINK 1.9建立二等位、缺失率和MAF过滤后的标记面板。HWE会按Profile标注“可解释”或“仅描述”；PCA、IBD/PI_HAT、LD与ROH默认不参与质量扣分。</p>
+            <div class="module-check-grid">
+              <label><input id="populationHwe" type="checkbox" checked><span><b>HWE</b><small>位点检验；棉花/自交/多倍体仅描述</small></span></label>
+              <label><input id="populationPca" type="checkbox" checked><span><b>PCA</b><small>LD剪枝标记面板与主成分表</small></span></label>
+              <label><input id="populationKinship" type="checkbox" checked><span><b>亲缘关系</b><small>PLINK 1.9 IBD / PI_HAT，不误标为KING</small></span></label>
+              <label><input id="populationLd" type="checkbox" checked><span><b>LD</b><small>限定标记数的LD衰减统计</small></span></label>
+              <label><input id="populationRoh" type="checkbox" checked><span><b>ROH</b><small>样本汇总与纯合片段明细</small></span></label>
+            </div>
+            <div class="threshold-grid compact-grid">
+              <label class="field"><span>面板位点缺失上限</span><input id="populationSiteMissing" type="number" min="0" max="1" step="0.01" value="0.10"></label>
+              <label class="field"><span>LD最多标记数</span><input id="populationLdMarkers" type="number" min="100" max="20000" step="100" value="5000"></label>
+              <label class="field"><span>LD窗口（kb）</span><input id="populationLdWindow" type="number" min="10" max="10000" step="10" value="1000"></label>
+            </div>
+          </section>
           <section class="quality-config-card safety-card">
             <div><h4>自动修复安全策略</h4><p>评估阶段只给出建议，不修改源VCF。安全修复只生成新文件；任何覆盖、改写基因型/REF、坐标转换、重命名或删除操作都必须弹出二次确认窗口。</p></div>
             <button class="secondary" id="showRepairPolicyBtn">查看二次确认规则</button>
+          </section>
+          <section class="quality-config-card" id="repairExecutorCard">
+            <h4>安全自动修复执行器</h4>
+            <p class="sub" id="repairAvailability">正在检测bcftools…</p>
+            <div class="advanced-grid">
+              <label class="field"><span>操作</span><select id="repairAction"><option value="index">建立缺失索引</option><option value="sort_copy">生成排序后的新副本</option><option value="normalize_copy">生成标准化的新副本（需二次确认）</option><option value="filter_copy">生成过滤后的新副本（需二次确认）</option></select></label>
+              <label class="field span-2 repair-output-field hidden"><span>新输出VCF.GZ</span><div class="resource-input"><input id="repairOutputPath" type="text" placeholder="必须是尚不存在的新路径"><button class="secondary browse-resource" data-target="repairOutputPath" data-kind="repair_output">选择…</button></div></label>
+              <label class="field span-2 repair-reference-field hidden"><span>参考基因组FASTA</span><div class="resource-input"><input id="repairReferencePath" type="text"><button class="secondary browse-resource" data-target="repairReferencePath" data-kind="reference">选择…</button></div></label>
+              <label class="field span-2 repair-expression-field hidden"><span>bcftools过滤表达式</span><input id="repairExpression" type="text" placeholder="例如：QUAL>=30 &amp;&amp; F_MISSING&lt;0.1"></label>
+            </div>
+            <div class="button-row"><button class="secondary hidden" id="repairCancelBtn">取消执行</button><button class="primary" id="repairPlanBtn">生成并核对执行计划</button></div>
+            <div id="repairResult" class="notice">尚未生成计划；任何操作都不会静默修改原VCF。</div>
           </section>
         </div>
         <div id="qualityProgress" class="quality-progress hidden"><div class="progress-head"><b id="qualityProgressText">准备中</b><span id="qualityProgressValue">0%</span></div><div class="progress-track"><i id="qualityProgressBar"></i></div><small id="qualityProcessed"></small></div>
@@ -239,7 +267,7 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <div class="modal-backdrop hidden" id="dangerRepairModal" role="dialog" aria-modal="true" aria-labelledby="dangerRepairTitle">
-    <div class="confirm-modal"><span class="danger-icon">!</span><h3 id="dangerRepairTitle">危险修复必须二次确认</h3><p>此类操作可能改变或覆盖数据。CallVCF必须先展示输入、输出、改写字段和可恢复性；用户随后输入指定确认短语，执行按钮才会解锁。</p><div class="danger-list"><b>永不静默执行：</b>覆盖原VCF、修改REF/ALT或GT、liftover、染色体批量重命名、删除文件。</div><label class="field"><span>确认演示：输入“我已核对目标文件”</span><input id="dangerConfirmText" autocomplete="off"></label><div class="modal-actions"><button class="secondary" id="dangerCancelBtn">返回</button><button class="danger-button" id="dangerConfirmBtn" disabled>确认规则已了解</button></div></div>
+    <div class="confirm-modal"><span class="danger-icon">!</span><h3 id="dangerRepairTitle">危险修复必须二次确认</h3><p id="dangerRepairDescription">危险计划会改变记录表达或记录集合。请逐项核对输入、输出和实际命令；原VCF不会被覆盖。</p><div class="danger-list" id="dangerPlanSummary"><b>永不支持：</b>覆盖原VCF或已有目标、删除文件、静默改写GT。</div><label class="field"><span id="dangerConfirmLabel">确认短语</span><input id="dangerConfirmText" autocomplete="off"></label><div class="modal-actions"><button class="secondary" id="dangerCancelBtn">返回</button><button class="danger-button" id="dangerConfirmBtn" disabled>确认并执行</button></div></div>
   </div>
   <script src="/app.js" defer></script>
 </body>

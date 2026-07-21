@@ -9,6 +9,7 @@ import app as app_module
 from app import AppServer, Handler
 from advanced_analysis import AdvancedAnalyzer
 from quality_engine import QualityJobManager
+from repair_engine import RepairExecutor
 from vcf_service import create_service
 
 
@@ -36,6 +37,7 @@ def main():
     app_module.SERVICE = create_service(args.bcftools)
     app_module.ADVANCED = AdvancedAnalyzer(app_module.SERVICE)
     app_module.QUALITY = QualityJobManager(app_module.SERVICE)
+    app_module.REPAIR = RepairExecutor(app_module.SERVICE)
     try:
         server = AppServer(("127.0.0.1", args.port), Handler)
     except OSError:

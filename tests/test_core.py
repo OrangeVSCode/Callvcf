@@ -14,6 +14,8 @@ from advanced_analysis import AdvancedAnalyzer, genotype_dosage, pairwise_r2, pa
 from tool_manager import tools_status
 from quality_engine import QualityEvaluator, QualityJobManager, render_report
 from quality_profiles import resolve_profile
+from population_analysis import PopulationAnalyzer
+from repair_engine import RepairExecutor
 
 
 def bgzf_block(data):
@@ -228,6 +230,67 @@ class CoreTests(unittest.TestCase):
             names = {x["name"] for x in current["artifacts"]}
             self.assertTrue({"report.html", "report_summary.json", "sample_metrics.tsv", "warnings.tsv", "run_manifest.json", "CallVCF_QC_report.zip"}.issubset(names))
             self.assertTrue(manager.artifact(job["id"], "report.html").is_file())
+
+    def test_sv_heterozygosity_uses_cohort_outliers(self):
+        samples = ["S{:02d}".format(i) for i in range(30)]
+        header = [
+            "##fileformat=VCFv4.2",
+            "##FORMAT=<ID=GT,Number=1,Type=String,Description=Genotype>",
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t" + "\t".join(samples),
+        ]
+        rows = []
+        for pos in range(1, 101):
+            genotypes = []
+            for index in range(30):
+                # Every sample has the same 20% cohort-background SV het rate.
+                gt = "0/1" if (pos + index) % 5 == 0 else "0/0"
+                # One genuinely extreme sample is heterozygous at every site.
+                if index == 29:
+                    gt = "0/1"
+                genotypes.append(gt)
+            rows.append("1\t{}\t.\tN\t<DEL>\t.\tPASS\tSVTYPE=DEL;END={}\tGT\t{}".format(pos, pos + 10, "\t".join(genotypes)))
+        with tempfile.TemporaryDirectory(prefix="callvcf-sv-het-") as temp_name:
+            path = Path(temp_name) / "uniform_sv.vcf"
+            path.write_text("\n".join(header + rows) + "\n", encoding="utf-8")
+            result = QualityEvaluator(PurePythonVCFService()).evaluate(str(path), {
+                "profile": {"profile_id": "cotton_inbred"}, "scan_mode": "full",
+            })
+        per_sample = [x for x in result["warnings"] if x["scope"] == "sample" and x["code"] in {"HIGH_HET", "HET_OUTLIER"}]
+        self.assertLessEqual(len(per_sample), 1)
+        self.assertEqual(per_sample[0]["target"], "S29")
+        self.assertEqual(per_sample[0]["level"], "warning")
+        self.assertTrue(any(x["code"] == "SV_HET_RELATIVE_ONLY" for x in result["warnings"]))
+        self.assertEqual(result["cohort_metrics"]["het_rule_mode"], "cohort_relative_sv")
+
+    def test_population_analysis_unavailable_is_nonfatal(self):
+        analyzer = PopulationAnalyzer(plink=str(Path("definitely-missing-plink")))
+        analyzer.plink = None
+        with tempfile.TemporaryDirectory(prefix="callvcf-pop-unavailable-") as temp_name:
+            result = analyzer.run(
+                str(Path(__file__).resolve().parent / "fixtures" / "tiny.vcf"),
+                resolve_profile({"profile_id": "cotton_inbred"}), temp_name,
+                {"hwe": True, "pca": False, "kinship": False, "ld": False, "roh": False},
+            )
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["modules"]["hwe"]["status"], "unavailable")
+        self.assertEqual(result["modules"]["hwe"]["interpretation"], "descriptive_only_not_scored_for_profile")
+
+    def test_repair_plan_blocks_overwrite_and_requires_unique_phrase(self):
+        class Service:
+            bcftools = "bcftools-test-double"
+        executor = RepairExecutor(Service())
+        fixture = Path(__file__).resolve().parent / "fixtures" / "tiny.vcf"
+        with self.assertRaises(Exception):
+            executor.plan({"action": "sort_copy", "path": str(fixture), "output_path": str(fixture)})
+        with tempfile.TemporaryDirectory(prefix="callvcf-repair-plan-") as temp_name:
+            plan = executor.plan({
+                "action": "filter_copy", "path": str(fixture),
+                "output_path": str(Path(temp_name) / "filtered.vcf.gz"),
+                "expression": "QUAL>=30",
+            })
+        self.assertEqual(plan["risk"], "dangerous")
+        self.assertTrue(plan["confirmation_phrase"].startswith("确认执行-"))
+        self.assertIn("<temporary-output>", plan["command_preview"])
 
 
 if __name__ == "__main__":

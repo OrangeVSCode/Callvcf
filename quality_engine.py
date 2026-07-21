@@ -18,6 +18,7 @@ from collections import Counter
 from pathlib import Path
 
 from quality_profiles import profile_catalog, resolve_profile
+from population_analysis import PopulationAnalyzer
 from vcf_service import VCFError, classify_variant, detect_compression, parse_info
 
 
@@ -69,12 +70,31 @@ def _mad(values, center=None):
     return statistics.median(abs(x - center) for x in values)
 
 
+def _quantile(values, probability):
+    values = sorted(x for x in values if x is not None)
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    position = max(0.0, min(1.0, probability)) * (len(values) - 1)
+    left = int(math.floor(position))
+    right = int(math.ceil(position))
+    if left == right:
+        return values[left]
+    fraction = position - left
+    return values[left] * (1 - fraction) + values[right] * fraction
+
+
 def _fmt(value, digits=3):
     if value is None:
         return "—"
+    if isinstance(value, bool):
+        return "是" if value else "否"
     if isinstance(value, int):
         return "{:,}".format(value)
-    return ("{:,.%df}" % digits).format(value)
+    if isinstance(value, float):
+        return ("{:,.%df}" % digits).format(value)
+    return str(value)
 
 
 def _ratio(value):
@@ -381,6 +401,42 @@ class QualityEvaluator:
         het_values = [x["het_rate"] for x in report_samples if x["het_rate"] is not None]
         het_center = _median(het_values)
         het_mad = _mad(het_values, het_center)
+        het_q01 = _quantile(het_values, 0.01)
+        het_q99 = _quantile(het_values, 0.99)
+        robust_scale = 1.4826 * het_mad if het_mad else None
+        relative_upper = None
+        relative_critical = None
+        if len(het_values) >= 20 and het_center is not None:
+            if robust_scale:
+                relative_upper = max(het_q99, het_center + 5 * robust_scale)
+                relative_critical = max(_quantile(het_values, 0.995), het_center + 8 * robust_scale)
+            elif het_q99 is not None and het_q99 > het_center:
+                relative_upper = het_q99
+                relative_critical = _quantile(het_values, 0.995)
+        variant_classes = set(type_counts)
+        sv_only = bool(variant_classes) and variant_classes == {"SV"}
+        het_rule_mode = "cohort_relative_sv" if sv_only else "profile_absolute_plus_relative"
+
+        if sv_only and thresholds.get("het_rate_warn") is not None:
+            warnings.append(_warning(
+                "info", "cohort", metadata["name"], "SV_HET_RELATIVE_ONLY",
+                "SV文件不使用SNP/INDEL的绝对杂合率阈值逐样本报警",
+                "队列中位杂合率{}；改用队列相对极端值".format(_ratio(het_center)),
+                "结合SV caller、变异类型和群体分组解释",
+            ))
+        elif thresholds.get("het_rate_warn") is not None and het_center is not None:
+            if thresholds.get("het_rate_critical") is not None and het_center >= thresholds["het_rate_critical"]:
+                warnings.append(_warning(
+                    "warning", "cohort", metadata["name"], "COHORT_HIGH_HET",
+                    "队列整体杂合率超过当前Profile的严重参考线", _ratio(het_center),
+                    "先核对材料类型、变异过滤和亚基因组错配；不会因此给全部样本重复报警",
+                ))
+            elif het_center >= thresholds["het_rate_warn"]:
+                warnings.append(_warning(
+                    "warning", "cohort", metadata["name"], "COHORT_HIGH_HET",
+                    "队列整体杂合率超过当前Profile提醒线", _ratio(het_center),
+                    "结合材料世代和变异类型解释；逐样本仅报告相对极端值",
+                ))
         for item in report_samples:
             sid = item["sample_id"]
             missing = item["missing_rate"]
@@ -399,12 +455,21 @@ class QualityEvaluator:
             elif dp is not None and dp > thresholds["median_dp_max_warn"]:
                 warnings.append(_warning("warning", "sample", sid, "HIGH_DP", "样本中位DP高于当前阈值", str(dp), "检查重复区、拷贝数和比对偏倚"))
             het = item["het_rate"]
-            if thresholds.get("het_rate_critical") is not None and het is not None and het >= thresholds["het_rate_critical"]:
-                warnings.append(_warning("critical", "sample", sid, "HIGH_HET", "杂合率超过当前Profile的严重阈值", _ratio(het), "结合材料类型、亚基因组错配和污染复核"))
-            elif thresholds.get("het_rate_warn") is not None and het is not None and het >= thresholds["het_rate_warn"]:
-                warnings.append(_warning("warning", "sample", sid, "HIGH_HET", "杂合率超过当前Profile提醒阈值", _ratio(het), "结合材料世代与倍性解释"))
-            elif thresholds.get("het_rate_warn") is None and het is not None and het_mad and abs(het - het_center) > 3 * 1.4826 * het_mad:
-                warnings.append(_warning("warning", "sample", sid, "HET_OUTLIER", "杂合率为队列稳健离群值", _ratio(het), "不使用跨物种绝对阈值，请结合群体结构复核"))
+            if het is not None and relative_upper is not None and het > relative_upper:
+                if relative_critical is not None and het > relative_critical:
+                    message = "杂合率为队列中的极端高值"
+                else:
+                    message = "杂合率为队列中的相对高值"
+                corroborated = (
+                    missing is not None and missing >= thresholds["sample_missing_critical"]
+                ) or (
+                    gq is not None and gq < thresholds["median_gq_critical"]
+                )
+                level = "critical" if corroborated else "warning"
+                warnings.append(_warning(
+                    level, "sample", sid, "HET_OUTLIER", message, _ratio(het),
+                    "单一杂合率离群不判定样本失败；请结合品种分组、批次、缺失率和GQ复核",
+                ))
             mismatch = item["ploidy_mismatch_rate"]
             if mismatch is not None and mismatch > .05:
                 warnings.append(_warning("warning", "sample", sid, "PLOIDY_MISMATCH", "GT倍性与所选Profile不一致", _ratio(mismatch), "确认VCF GT编码与倍性设置"))
@@ -460,7 +525,13 @@ class QualityEvaluator:
                 "transitions": transitions, "transversions": transversions,
                 "titv": transitions / transversions if transversions else None,
             },
-            "cohort_metrics": {"median_het_rate": het_center, "het_mad": het_mad},
+            "cohort_metrics": {
+                "median_het_rate": het_center, "het_mad": het_mad,
+                "het_q01": het_q01, "het_q99": het_q99,
+                "het_relative_upper": relative_upper,
+                "het_relative_critical": relative_critical,
+                "het_rule_mode": het_rule_mode,
+            },
             "samples": report_samples,
             "warnings": warnings,
             "repair_policy": {
@@ -495,6 +566,36 @@ def _svg_bars(items, title, color="#2f725f", width=760, height=250):
     return '<svg viewBox="0 0 {} {}" role="img" aria-label="{}"><text x="20" y="23" font-size="15" font-weight="700" fill="#18342b">{}</text><line x1="{}" y1="{}" x2="{}" y2="{}" stroke="#b9c8c1"/>{}</svg>'.format(width, height, html.escape(title), html.escape(title), margin_l, margin_t + plot_h, width - margin_r, margin_t + plot_h, "".join(bars))
 
 
+def _svg_pca(rows, width=760, height=360):
+    points = [(x.get("PC1"), x.get("PC2"), str(x.get("sample_id") or "")) for x in rows]
+    points = [(float(x), float(y), label) for x, y, label in points if x is not None and y is not None]
+    if not points:
+        return '<div class="empty">PCA没有足够的PC1/PC2结果</div>'
+    xs, ys = [x[0] for x in points], [x[1] for x in points]
+    xmin, xmax, ymin, ymax = min(xs), max(xs), min(ys), max(ys)
+    xspan, yspan = xmax - xmin or 1, ymax - ymin or 1
+    circles = []
+    for x, y, label in points:
+        px = 55 + (x - xmin) / xspan * (width - 85)
+        py = 25 + (ymax - y) / yspan * (height - 75)
+        circles.append('<circle cx="{:.2f}" cy="{:.2f}" r="4" fill="#2f725f" opacity=".72"><title>{}: PC1={:.5g}, PC2={:.5g}</title></circle>'.format(px, py, html.escape(label), x, y))
+    return '<svg viewBox="0 0 {} {}" role="img" aria-label="PCA PC1 PC2"><line x1="55" y1="{}" x2="{}" y2="{}" stroke="#9eb2aa"/><line x1="55" y1="25" x2="55" y2="{}" stroke="#9eb2aa"/><text x="{}" y="{}" text-anchor="middle">PC1</text><text x="16" y="{}" transform="rotate(-90 16 {})" text-anchor="middle">PC2</text>{}</svg>'.format(width, height, height - 50, width - 30, height - 50, height - 50, width / 2, height - 12, height / 2, height / 2, "".join(circles))
+
+
+def _svg_ld_decay(rows, width=760, height=300):
+    values = [(str(x.get("distance_bin_kb")), x.get("mean_r2")) for x in rows if x.get("mean_r2") is not None]
+    if not values:
+        return '<div class="empty">LD衰减没有可绘制的位点对</div>'
+    points = []
+    for index, (label, value) in enumerate(values):
+        x = 60 + index * (width - 100) / max(1, len(values) - 1)
+        y = 25 + (1 - min(1, max(0, float(value)))) * (height - 80)
+        points.append((x, y, label, float(value)))
+    polyline = " ".join("{:.2f},{:.2f}".format(x, y) for x, y, _, _ in points)
+    marks = "".join('<circle cx="{:.2f}" cy="{:.2f}" r="5" fill="#c76b27"><title>{} kb: mean r²={:.4f}</title></circle><text x="{:.2f}" y="{}" text-anchor="middle" font-size="10">{}</text>'.format(x, y, html.escape(label), value, x, height - 30, html.escape(label)) for x, y, label, value in points)
+    return '<svg viewBox="0 0 {} {}" role="img" aria-label="LD decay"><line x1="60" y1="{}" x2="{}" y2="{}" stroke="#9eb2aa"/><line x1="60" y1="25" x2="60" y2="{}" stroke="#9eb2aa"/><polyline points="{}" fill="none" stroke="#c76b27" stroke-width="3"/>{}</svg>'.format(width, height, height - 55, width - 30, height - 55, height - 55, polyline, marks)
+
+
 def render_report(result):
     summary = result["summary"]
     profile = result["profile"]
@@ -516,6 +617,22 @@ def render_report(result):
     for key, value in profile["thresholds"].items():
         threshold_rows.append("<tr><td>{}</td><td>{}</td><td>{}</td></tr>".format(html.escape(key), html.escape(str(value)), html.escape(profile["threshold_sources"].get(key, ""))))
     status_label = {"pass": "通过", "warning": "需关注", "critical": "高风险"}[summary["status"]]
+    population = result.get("population_analysis") or {}
+    population_rows = []
+    module_names = {"hwe": "HWE", "pca": "PCA", "kinship": "亲缘关系/IBD", "ld": "LD衰减", "roh": "ROH"}
+    for key, module in (population.get("modules") or {}).items():
+        details = module.get("summary") or {}
+        compact = "；".join("{}={}".format(k, _fmt(v)) for k, v in list(details.items())[:6])
+        files = " ".join("<a href='{}'>{}</a>".format(html.escape(name), html.escape(name)) for name in module.get("artifacts", []))
+        population_rows.append("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+            html.escape(module_names.get(key, key)), html.escape(module.get("status", "")),
+            html.escape(compact or module.get("error") or "—"), files or "—"))
+    population_section = ""
+    if population:
+        modules = population.get("modules") or {}
+        pca_chart = _svg_pca((modules.get("pca") or {}).get("preview") or [])
+        ld_chart = _svg_ld_decay((modules.get("ld") or {}).get("preview") or [])
+        population_section = "<section class='card'><h2>群体遗传分析</h2><p class='note'>这些模块使用过滤后的二等位标记面板；HWE是否参与质量解释由Profile决定，其余默认作为探索性证据，不自动给样本定性。</p><div class='table'><table><thead><tr><th>模块</th><th>状态</th><th>摘要</th><th>结果文件</th></tr></thead><tbody>{}</tbody></table></div></section><div class='grid'><section class='card'><h2>PCA：PC1 × PC2</h2>{}</section><section class='card'><h2>LD衰减（平均r²）</h2>{}</section></div>".format("".join(population_rows) or "<tr><td colspan='4'>未启用</td></tr>", pca_chart, ld_chart)
     embedded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
     template = """<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>CallVCF质量评估报告</title><style>
     :root{--ink:#18342b;--muted:#667a72;--line:#d8e2dd;--brand:#2f725f;--soft:#f2f7f4;--warn:#a96200;--crit:#a62d33}*{box-sizing:border-box}body{margin:0;background:#edf3ef;color:var(--ink);font-family:"Microsoft YaHei",Arial,sans-serif}main{max-width:1180px;margin:auto;padding:30px}.hero,.card{background:white;border:1px solid var(--line);border-radius:18px;padding:24px;margin-bottom:18px}.hero{background:linear-gradient(135deg,#173c31,#347966);color:white}.hero h1{font-size:34px;margin:5px 0}.hero p{opacity:.82}.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}.kpi{background:var(--soft);border-radius:14px;padding:16px}.kpi b{display:block;font-size:25px;margin-top:6px}.score{font-size:64px;font-weight:800}.status-pass{color:#d6ffe8}.status-warning{color:#ffe09c}.status-critical{color:#ffb1b4}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}h2{font-size:21px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;padding:9px;border-bottom:1px solid #e8eeeb}th{position:sticky;top:0;background:#f6faf8}.table{max-height:520px;overflow:auto;border:1px solid var(--line);border-radius:10px}.badge{padding:3px 7px;border-radius:10px;font-weight:700}.badge.info{background:#e8eef3}.badge.warning{background:#fff0cc;color:#805000}.badge.critical{background:#ffe0e1;color:#98242b}.note{padding:12px;background:#fff7df;border-left:4px solid #d18b00}.actions{display:flex;gap:8px;flex-wrap:wrap}.actions button{border:0;border-radius:9px;padding:10px 14px;background:#e8f1ed;color:var(--ink);cursor:pointer}.actions button:first-child{background:white}.empty{padding:30px;color:var(--muted)}svg{width:100%;height:auto}@media(max-width:800px){.kpis,.grid{grid-template-columns:1fr 1fr}}@media print{body{background:white}main{max-width:none;padding:0}.actions{display:none}.card,.hero{break-inside:avoid;border-color:#bbb}.table{max-height:none;overflow:visible}}
@@ -526,6 +643,7 @@ def render_report(result):
     <section class='card'><h2>告警与建议</h2><div class='table'><table><thead><tr><th>级别</th><th>范围</th><th>对象</th><th>问题</th><th>建议</th></tr></thead><tbody>{warning_rows}</tbody></table></div></section>
     <section class='card'><h2>样本质量指标</h2><div class='table'><table><thead><tr><th>样本</th><th>缺失率</th><th>杂合率</th><th>中位DP</th><th>中位GQ</th><th>AB异常</th><th>倍性不符</th></tr></thead><tbody>{sample_rows}</tbody></table></div></section>
     <section class='card'><h2>有效阈值与来源</h2><div class='table'><table><thead><tr><th>阈值</th><th>有效值</th><th>来源</th></tr></thead><tbody>{threshold_rows}</tbody></table></div></section>
+    {population_section}
     <section class='card'><h2>自动修复安全策略</h2><p>原始VCF永不被静默覆盖。覆盖源文件、改写REF/ALT/GT、坐标转换、染色体批量重命名和删除文件均被定义为危险操作，执行前必须再次确认。</p></section>
     <script type='application/json' id='reportData'>{embedded}</script><script>function downloadJson(){const text=document.getElementById('reportData').textContent;const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'application/json;charset=utf-8'}));a.download='report_summary.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}</script></main></body></html>"""
     values = {
@@ -540,7 +658,7 @@ def render_report(result):
         "type_chart": _svg_bars(sorted(site["variant_types"].items()), "SNP / INDEL / SV"),
         "missing_chart": _svg_bars([(x, site["missing_rate_bins"].get(x, 0)) for x in ["0–1%", "1–5%", "5–10%", "10–20%", ">20%"]], "位点缺失率"),
         "warning_rows": "".join(warning_rows) or "<tr><td colspan='5'>未触发告警</td></tr>", "sample_rows": "".join(sample_rows),
-        "threshold_rows": "".join(threshold_rows), "embedded": embedded,
+        "threshold_rows": "".join(threshold_rows), "population_section": population_section, "embedded": embedded,
     }
     for key, value in values.items():
         template = template.replace("{" + key + "}", str(value))
@@ -551,6 +669,7 @@ class QualityJobManager:
     def __init__(self, service):
         self.service = service
         self.evaluator = QualityEvaluator(service)
+        self.population = PopulationAnalyzer()
         self._jobs = {}
         self._lock = threading.Lock()
 
@@ -575,10 +694,16 @@ class QualityJobManager:
             "run_dir": str(run_dir), "artifacts": [], "result": None, "error": None,
             "cancel": threading.Event(),
         }
+        raw_population = payload.get("population_options") if isinstance(payload.get("population_options"), dict) else {}
+        population_options = {key: bool(raw_population.get(key, False)) for key in ("hwe", "pca", "kinship", "ld", "roh")}
+        for key in ("site_missing", "maf", "prune_window", "prune_step", "prune_r2", "pca_components", "ld_max_markers", "ld_window_kb"):
+            if key in raw_population:
+                population_options[key] = raw_population[key]
         config = {
             "profile": payload.get("profile") or {"profile_id": profile["id"]},
             "scan_mode": payload.get("scan_mode") or "smart",
             "target_records": payload.get("target_records") or 200000,
+            "population_options": population_options,
         }
         with self._lock:
             self._jobs[run_id] = job
@@ -596,10 +721,24 @@ class QualityJobManager:
 
             def progress(records, percent, message):
                 job["processed_records"] = records
-                job["progress"] = round(percent, 2) if percent is not None else None
+                job["progress"] = round(percent * .55, 2) if percent is not None else None
                 job["message"] = message
 
             result = self.evaluator.evaluate(path, config, progress, job["cancel"])
+            population_options = config.get("population_options") or {}
+            if any(population_options.get(key, False) for key in ("hwe", "pca", "kinship", "ld", "roh")):
+                def population_progress(percent, message):
+                    job["progress"] = round(percent, 2)
+                    job["message"] = message
+                result["population_analysis"] = self.population.run(
+                    path, result["profile"], run_dir, population_options,
+                    population_progress, job["cancel"],
+                )
+            else:
+                result["population_analysis"] = self.population.run(
+                    path, result["profile"], run_dir, population_options,
+                    None, job["cancel"],
+                )
             report_path = run_dir / "report.html"
             json_path = run_dir / "report_summary.json"
             samples_path = run_dir / "sample_metrics.tsv"
@@ -624,11 +763,16 @@ class QualityJobManager:
             }
             manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
             zip_path = run_dir / "CallVCF_QC_report.zip"
+            population_files = []
+            for name in result.get("population_analysis", {}).get("artifacts", []):
+                item = run_dir / name
+                if item.is_file() and item.parent == run_dir:
+                    population_files.append(item)
             with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                for item in [report_path, json_path, samples_path, warnings_path, manifest_path]:
+                for item in [report_path, json_path, samples_path, warnings_path, manifest_path] + population_files:
                     archive.write(item, item.name)
             artifacts = []
-            for item in [report_path, json_path, samples_path, warnings_path, manifest_path, zip_path]:
+            for item in [report_path, json_path, samples_path, warnings_path, manifest_path] + population_files + [zip_path]:
                 artifacts.append({"name": item.name, "size": item.stat().st_size, "url": "/api/quality/artifact?run_id={}&name={}".format(job["id"], item.name)})
             job["result"] = result
             job["artifacts"] = artifacts
