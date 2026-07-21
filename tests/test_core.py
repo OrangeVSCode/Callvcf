@@ -1,13 +1,29 @@
+import gzip
+import struct
 import sys
+import tempfile
 import unittest
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from vcf_service import classify_variant, genotype_alleles, normalize_genotype, parse_loci
+from vcf_service import classify_variant, detect_compression, genotype_alleles, normalize_genotype, parse_loci
 from vcf_service import PurePythonVCFService
 from advanced_analysis import AdvancedAnalyzer, genotype_dosage, pairwise_r2, pairwise_dprime, parse_region, parse_trait_directions
 from tool_manager import tools_status
+
+
+def bgzf_block(data):
+    compressor = zlib.compressobj(level=6, wbits=-15)
+    payload = compressor.compress(data) + compressor.flush()
+    block_size = 18 + len(payload) + 8
+    header = (
+        b"\x1f\x8b\x08\x04" + b"\x00\x00\x00\x00" + b"\x00\xff" +
+        struct.pack("<H", 6) + b"BC" + struct.pack("<H", 2) + struct.pack("<H", block_size - 1)
+    )
+    footer = struct.pack("<II", zlib.crc32(data) & 0xFFFFFFFF, len(data) & 0xFFFFFFFF)
+    return header + payload + footer
 
 
 class CoreTests(unittest.TestCase):
@@ -107,6 +123,58 @@ class CoreTests(unittest.TestCase):
             "trait_directions": "", "significance_threshold": 0.01,
         })
         self.assertIsNone(no_direction["summaries"][0]["trend_index"])
+
+    def test_gzip_vcf_all_core_paths(self):
+        fixtures = Path(__file__).resolve().parent / "fixtures"
+        source = fixtures / "tiny.vcf"
+        with tempfile.TemporaryDirectory(prefix="callvcf-gzip-test-") as temp_name:
+            compressed = Path(temp_name) / "tiny.vcf.gz"
+            with gzip.open(compressed, "wb", compresslevel=6) as handle:
+                handle.write(source.read_bytes())
+
+            service = PurePythonVCFService()
+            metadata = service.inspect(str(compressed))
+            self.assertEqual(detect_compression(compressed), "gzip")
+            self.assertTrue(metadata["compressed"])
+            self.assertEqual(metadata["compression"], "gzip")
+            self.assertFalse(metadata["index_usable"])
+            self.assertIn("no decompressed", metadata["space_mode"])
+            self.assertEqual(metadata["sample_count"], 4)
+
+            existence = service.check_loci(str(compressed), "1:100\n1:999")
+            self.assertTrue(existence["results"][0]["exists"])
+            self.assertFalse(existence["results"][1]["exists"])
+
+            distribution = service.distributions(str(compressed), "1:100")
+            self.assertEqual(distribution["records"][0]["counts"]["HET"], 1)
+            matrix = service.sample_locus_matrix(str(compressed), "1:100\n1:300", ["S2"])
+            self.assertEqual([x["gt"] for x in matrix["rows"][0]["values"]], ["0/1", "0/1"])
+            stats = service.sample_stats(str(compressed), ["S2"])
+            self.assertEqual(stats["processed_records"], 3)
+            self.assertEqual(stats["results"][0]["counts"]["HET"], 2)
+
+            analyzer = AdvancedAnalyzer(service)
+            result = analyzer.analyze({
+                "path": str(compressed), "lead_locus": "1:100", "window_kb": 1,
+                "r2_threshold": 0.8, "min_samples": 3,
+                "options": {"ld": True, "gene_track": True, "gene": True, "function": True},
+                "gff_path": str(fixtures / "tiny.gff3"),
+            })
+            self.assertEqual(result["ld"]["linked_variant_count"], 2)
+            self.assertEqual(result["gene"]["matches"][0]["relation"], "CDS")
+            self.assertEqual(result["function"]["vcf_info"][0]["effect"], "missense_variant")
+
+    def test_bgzf_content_detection_and_direct_read(self):
+        fixtures = Path(__file__).resolve().parent / "fixtures"
+        with tempfile.TemporaryDirectory(prefix="callvcf-bgzf-test-") as temp_name:
+            compressed = Path(temp_name) / "renamed.data"
+            compressed.write_bytes(bgzf_block((fixtures / "tiny.vcf").read_bytes()))
+            service = PurePythonVCFService()
+            metadata = service.inspect(str(compressed))
+            self.assertEqual(metadata["compression"], "bgzf")
+            self.assertEqual(metadata["storage"], "BGZF VCF（压缩直读）")
+            self.assertEqual(metadata["sample_count"], 4)
+            self.assertTrue(service.check_loci(str(compressed), "1:300")["results"][0]["exists"])
 
 
 if __name__ == "__main__":

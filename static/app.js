@@ -86,6 +86,9 @@ async function checkHealth() {
 
 function renderMetadata(meta) {
   const types = Object.entries(meta.observed_types || {}).map(([k, v]) => `<span class="chip">${escapeHtml(k)} · ${formatNumber(v)}</span>`).join("");
+  const queryLabel = meta.index_usable
+    ? "已索引 · 随机访问"
+    : (meta.indexed ? "检测到索引 · 当前流式读取" : (meta.compressed ? "压缩直读 · 流式筛选" : "未索引 · 流式筛选"));
   $("metadata").className = "metadata";
   $("metadata").innerHTML = `
     <div class="meta-grid">
@@ -94,7 +97,8 @@ function renderMetadata(meta) {
       <div class="meta-card"><span>样本数</span><strong>${formatNumber(meta.sample_count)}</strong></div>
       <div class="meta-card"><span>记录数</span><strong>${formatNumber(meta.record_count)}</strong></div>
       <div class="meta-card"><span>染色体/Contig</span><strong>${formatNumber(meta.contig_count)}</strong></div>
-      <div class="meta-card"><span>查询模式</span><strong title="${escapeHtml(meta.query_mode)}">${meta.indexed ? "已索引 · 随机访问" : "未索引 · 流式筛选"}</strong></div>
+      <div class="meta-card"><span>查询模式</span><strong title="${escapeHtml(meta.query_mode)}">${queryLabel}</strong></div>
+      <div class="meta-card"><span>磁盘占用</span><strong title="${escapeHtml(meta.space_mode || "")}">原文件直读 · 不生成解压副本</strong></div>
     </div>
     <div class="meta-path">${escapeHtml(meta.path)} · ${formatBytes(meta.file_size)}</div>
     <div class="type-chips">${types || '<span class="chip">未观察到记录</span>'}</div>`;

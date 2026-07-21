@@ -4,7 +4,7 @@ CallVCF 是一个面向大规模 VCF 的本地交互查询工具。它在浏览�
 
 ## 功能
 
-- 自动识别 plain VCF、`vcf.gz`/BGZF、BCF、索引状态、样本数、contig 和观察到的 SNP/INDEL/SV 类型。
+- 自动识别 plain VCF、普通 gzip VCF、BGZF VCF、BCF、索引状态、样本数、contig 和观察到的 SNP/INDEL/SV 类型；识别依据为文件内容，不只看扩展名。
 - 批量检查 `chr:pos` 位点是否存在；同一位置的多条记录分别展示。
 - 查询一个或一批位点在所有样本中的基因型分布：`0/0`、`0/1`、`1/1`、缺失及多等位/其他，并列出具体样本。
 - 查询指定样本在指定位置的 GT、实际等位基因和类别矩阵。
@@ -16,7 +16,8 @@ CallVCF 是一个面向大规模 VCF 的本地交互查询工具。它在浏览�
 - 读取单个或整目录 EMMAX/GWAS `.ps` 文件，汇总连锁区域内每个表型的最小 P 值与峰值 Marker。
 - 可调用本地 LDBlockShow，传入 VCF、连锁区间、GFF 与区域 GWAS 数据，保留 `.blocks.gz`、`.site.gz`、SVG/PNG 等原始结果。
 - 页面内置可选工具管理器：一键下载官方 PLINK 1.9 与 LDBlockShow，自动保存到当前用户的 CallVCF 工具目录；第三方工具不上传用户数据。
-- 有索引时随机访问；没有索引时自动切换到流式目标筛选。
+- `.vcf.gz` 的位点查询、样本统计、LD/热图、基因注释、样本画像、PLINK 与 LDBlockShow 路径均直接读取压缩源文件，不生成同体积的解压 VCF 副本。
+- bcftools 可用且 `.tbi/.csi` 索引有效时随机访问；没有索引时自动切换到内存管道或压缩流式筛选，不再落盘生成临时 BCF 子集。
 - 支持服务器目录内 VCF/BCF 文件发现，无需复制大型文件。
 
 ## 运行条件
@@ -41,7 +42,7 @@ conda install -c bioconda bcftools
 
 ### Windows 本地页面
 
-安装 Python 3.8+ 后，直接双击 `Start_CallVCF.bat`。工具会自动打开浏览器，并只监听本机 `127.0.0.1`。纯文本 VCF 和 VCF.GZ 可直接读取；安装 `bcftools` 后可加速带索引的大型 VCF，并支持 BCF。
+安装 Python 3.8+ 后，直接双击 `Start_CallVCF.bat`。工具会自动打开浏览器，并只监听本机 `127.0.0.1`。纯文本 VCF、普通 `.vcf.gz` 和 BGZF `.vcf.gz` 均可直接读取；安装 `bcftools` 后可利用 `.tbi/.csi` 索引加速大型 VCF，并支持 BCF。
 
 也可以运行：
 
@@ -112,7 +113,7 @@ LDBlockShow 的基本调用形式为：
 LDBlockShow -InVCF input.vcf.gz -OutPut result_prefix -Region chr:start-end -SeleVar 2
 ```
 
-大型数据建议使用 BGZF 压缩且已建立索引的 VCF。若 Lead 窗口内超过 20,000 条变异，工具会提示缩小窗口，避免浏览器和内存被一次查询占满。
+大型数据建议使用 BGZF 压缩且已建立索引的 VCF。普通 gzip 也能完成所有内置查询，但不能由 tabix 随机定位，因此查询远端位点时仍需从文件开头顺序解压数据流。若 Lead 窗口内超过 20,000 条变异，工具会提示缩小窗口，避免浏览器和内存被一次查询占满。
 
 ## 样本 Lead-SNP 画像
 
@@ -141,7 +142,7 @@ bgzip input.vcf
 tabix -p vcf input.vcf.gz
 ```
 
-未索引文件仍可查询，但工具需要顺序读取文件。
+未索引文件仍可查询，工具会直接顺序读取 `.vcf.gz` 数据流，不会先解压成 `.vcf`。如果文件已有 `.tbi/.csi` 但页面显示“检测到索引 · 当前流式读取”，说明当前使用纯 Python 后端；安装/配置 bcftools 后才会显示并使用“已索引 · 随机访问”。
 
 ## 安全说明
 
