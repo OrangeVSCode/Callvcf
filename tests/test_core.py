@@ -12,7 +12,7 @@ from vcf_service import classify_variant, detect_compression, genotype_alleles, 
 from vcf_service import PurePythonVCFService
 from advanced_analysis import AdvancedAnalyzer, genotype_dosage, pairwise_r2, pairwise_dprime, parse_region, parse_trait_directions
 from tool_manager import tools_status
-from quality_engine import QualityEvaluator, QualityJobManager, render_report
+from quality_engine import QualityEvaluator, QualityJobManager, render_report, _svg_ld_decay
 from quality_profiles import resolve_profile
 from population_analysis import PopulationAnalyzer
 from repair_engine import RepairExecutor
@@ -291,6 +291,16 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(plan["risk"], "dangerous")
         self.assertTrue(plan["confirmation_phrase"].startswith("确认执行-"))
         self.assertIn("<temporary-output>", plan["command_preview"])
+
+    def test_ld_decay_chart_auto_scales_small_r2_values(self):
+        svg = _svg_ld_decay([
+            {"distance_bin_kb": "0-10", "pair_count": 426, "mean_r2": 0.0231},
+            {"distance_bin_kb": "500-1000", "pair_count": 8073, "mean_r2": 0.0185},
+        ])
+        self.assertIn("纵轴自动缩放", svg)
+        self.assertIn("0.0231", svg)
+        self.assertIn("8,073 pairs", svg)
+        self.assertNotIn("0–1</text>", svg)
 
 
 if __name__ == "__main__":

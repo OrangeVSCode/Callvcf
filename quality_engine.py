@@ -583,17 +583,46 @@ def _svg_pca(rows, width=760, height=360):
 
 
 def _svg_ld_decay(rows, width=760, height=300):
-    values = [(str(x.get("distance_bin_kb")), x.get("mean_r2")) for x in rows if x.get("mean_r2") is not None]
+    values = [
+        (str(x.get("distance_bin_kb")), float(x.get("mean_r2")), int(x.get("pair_count") or 0))
+        for x in rows if x.get("mean_r2") is not None
+    ]
     if not values:
         return '<div class="empty">LD衰减没有可绘制的位点对</div>'
+    maximum = max(value for _, value, _ in values)
+    raw_limit = max(maximum * 1.16, 0.001)
+    magnitude = 10 ** math.floor(math.log10(raw_limit))
+    scaled = raw_limit / magnitude
+    nice_scaled = next(step for step in (1, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10) if scaled <= step)
+    axis_max = nice_scaled * magnitude
+    margin_left, margin_right, margin_top, margin_bottom = 72, 28, 32, 68
+    plot_width = width - margin_left - margin_right
+    plot_height = height - margin_top - margin_bottom
     points = []
-    for index, (label, value) in enumerate(values):
-        x = 60 + index * (width - 100) / max(1, len(values) - 1)
-        y = 25 + (1 - min(1, max(0, float(value)))) * (height - 80)
-        points.append((x, y, label, float(value)))
-    polyline = " ".join("{:.2f},{:.2f}".format(x, y) for x, y, _, _ in points)
-    marks = "".join('<circle cx="{:.2f}" cy="{:.2f}" r="5" fill="#c76b27"><title>{} kb: mean r²={:.4f}</title></circle><text x="{:.2f}" y="{}" text-anchor="middle" font-size="10">{}</text>'.format(x, y, html.escape(label), value, x, height - 30, html.escape(label)) for x, y, label, value in points)
-    return '<svg viewBox="0 0 {} {}" role="img" aria-label="LD decay"><line x1="60" y1="{}" x2="{}" y2="{}" stroke="#9eb2aa"/><line x1="60" y1="25" x2="60" y2="{}" stroke="#9eb2aa"/><polyline points="{}" fill="none" stroke="#c76b27" stroke-width="3"/>{}</svg>'.format(width, height, height - 55, width - 30, height - 55, height - 55, polyline, marks)
+    for index, (label, value, pair_count) in enumerate(values):
+        x = margin_left + index * plot_width / max(1, len(values) - 1)
+        y = margin_top + (1 - max(0, value) / axis_max) * plot_height
+        points.append((x, y, label, value, pair_count))
+    polyline = " ".join("{:.2f},{:.2f}".format(x, y) for x, y, _, _, _ in points)
+    grids = []
+    for tick in range(5):
+        value = axis_max * tick / 4
+        y = margin_top + (1 - tick / 4) * plot_height
+        grids.append('<line x1="{}" y1="{:.2f}" x2="{}" y2="{:.2f}" stroke="#dfe8e3"/><text x="{}" y="{:.2f}" text-anchor="end" font-size="10" fill="#52645d">{:.3g}</text>'.format(margin_left, y, width - margin_right, y, margin_left - 8, y + 3, value))
+    marks = "".join(
+        '<circle cx="{:.2f}" cy="{:.2f}" r="5" fill="#c76b27"><title>{} kb: mean r²={:.4f}; {:,} pairs</title></circle>'
+        '<text x="{:.2f}" y="{:.2f}" text-anchor="middle" font-size="10" font-weight="700" fill="#8b4717">{:.4f}</text>'
+        '<text x="{:.2f}" y="{}" text-anchor="middle" font-size="10">{}</text>'
+        '<text x="{:.2f}" y="{}" text-anchor="middle" font-size="9" fill="#6d7e77">{:,}对</text>'.format(
+            x, y, html.escape(label), value, pair_count, x, max(13, y - 10), value,
+            x, height - 35, html.escape(label), x, height - 20, pair_count,
+        ) for x, y, label, value, pair_count in points
+    )
+    return '<svg viewBox="0 0 {} {}" role="img" aria-label="LD decay"><text x="18" y="{}" transform="rotate(-90 18 {})" text-anchor="middle" font-size="11">平均 r²</text>{}<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="#8fa39a"/><line x1="{}" y1="{}" x2="{}" y2="{}" stroke="#8fa39a"/><polyline points="{}" fill="none" stroke="#c76b27" stroke-width="3"/>{}<text x="{}" y="15" text-anchor="end" font-size="10" fill="#6d7e77">纵轴自动缩放：0–{:.3g}</text></svg>'.format(
+        width, height, height / 2, height / 2, "".join(grids), margin_left, margin_top + plot_height,
+        width - margin_right, margin_top + plot_height, margin_left, margin_top, margin_left,
+        margin_top + plot_height, polyline, marks, width - margin_right, axis_max,
+    )
 
 
 def render_report(result):
