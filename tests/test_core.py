@@ -231,7 +231,7 @@ class CoreTests(unittest.TestCase):
                 time.sleep(0.02)
             self.assertEqual(current["status"], "complete", current.get("error"))
             names = {x["name"] for x in current["artifacts"]}
-            self.assertTrue({"report.html", "report_summary.json", "sample_metrics.tsv", "variant_metrics.tsv", "site_metric_summary.tsv", "density_windows.tsv", "module_availability.tsv", "recommend_filters.tsv", "sv_metrics.tsv", "warnings.tsv", "run_manifest.json", "CallVCF_QC_report.zip"}.issubset(names))
+            self.assertTrue({"report.html", "report_summary.json", "sample_metrics.tsv", "variant_metrics.tsv", "site_metric_summary.tsv", "density_windows.tsv", "module_availability.tsv", "recommend_filters.tsv", "sv_metrics.tsv", "group_batch_metrics.tsv", "subgenome_metrics.tsv", "fake_heterozygosity_windows.tsv", "annotation_consequences.tsv", "warnings.tsv", "run_manifest.json", "CallVCF_QC_report.zip"}.issubset(names))
             self.assertTrue(manager.artifact(job["id"], "report.html").is_file())
 
     def test_sv_heterozygosity_uses_cohort_outliers(self):
@@ -264,6 +264,30 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(per_sample[0]["level"], "warning")
         self.assertTrue(any(x["code"] == "SV_HET_RELATIVE_ONLY" for x in result["warnings"]))
         self.assertEqual(result["cohort_metrics"]["het_rule_mode"], "cohort_relative_sv")
+
+    def test_quality_conditional_reference_metadata_and_bed(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "tiny.vcf"
+        with tempfile.TemporaryDirectory(prefix="callvcf-qc-inputs-") as temp_name:
+            root = Path(temp_name)
+            fasta = root / "ref.fa"
+            sequence = list("A" * 1000000)
+            sequence[200] = "T"; sequence[299] = "N"
+            fasta.write_text(">1\n" + "".join(sequence) + "\n", encoding="ascii")
+            Path(str(fasta) + ".fai").write_text("1\t1000000\t4\t1000000\t1000002\n", encoding="ascii")
+            metadata = root / "samples.tsv"
+            metadata.write_text("sample_id\tgroup\tbatch\nS1\tG1\tB1\nS2\tG1\tB1\nS3\tG2\tB2\nS4\tG2\tB2\n", encoding="utf-8")
+            bed = root / "regions.bed"
+            bed.write_text("1\t99\t101\trepeat\n", encoding="utf-8")
+            result = QualityEvaluator(PurePythonVCFService()).evaluate(str(fixture), {
+                "profile": {"profile_id": "generic_diploid_plant"}, "scan_mode": "full",
+                "reference_path": str(fasta), "sample_meta_path": str(metadata), "region_bed_path": str(bed),
+            })
+        self.assertEqual(result["reference_audit"]["status"], "complete")
+        self.assertEqual(result["reference_audit"]["mismatch_records"], 0)
+        self.assertEqual(result["metadata_audit"]["matched_vcf_samples"], 4)
+        self.assertEqual(result["region_audit"]["overlap_records"], 1)
+        self.assertEqual(result["samples"][0]["group"], "G1")
+        self.assertIn("sample_score", result["samples"][0])
 
     def test_population_analysis_unavailable_is_nonfatal(self):
         analyzer = PopulationAnalyzer(plink=str(Path("definitely-missing-plink")))
@@ -301,6 +325,13 @@ class CoreTests(unittest.TestCase):
             })
         self.assertIn("+fill-tags", tags_plan["command_preview"])
         self.assertEqual(tags_plan["risk"], "dangerous")
+        with tempfile.TemporaryDirectory(prefix="callvcf-repair-more-") as temp_name:
+            dedup = executor.plan({"action": "deduplicate_copy", "path": str(fixture), "output_path": str(Path(temp_name) / "dedup.vcf.gz")})
+            subset = executor.plan({"action": "subset_samples_copy", "path": str(fixture), "output_path": str(Path(temp_name) / "subset.vcf.gz"), "samples": "S1\nS2"})
+            mask = executor.plan({"action": "mask_genotypes_copy", "path": str(fixture), "output_path": str(Path(temp_name) / "mask.vcf.gz"), "expression": "FMT/DP<5 || FMT/GQ<20"})
+        self.assertIn("exact", dedup["command_preview"])
+        self.assertIn("S1,S2", subset["command_preview"])
+        self.assertIn("+setGT", mask["command_preview"])
 
     def test_ld_decay_chart_auto_scales_small_r2_values(self):
         svg = _svg_ld_decay([
@@ -311,6 +342,25 @@ class CoreTests(unittest.TestCase):
         self.assertIn("0.0231", svg)
         self.assertIn("8,073 pairs", svg)
         self.assertNotIn("0–1</text>", svg)
+
+    def test_population_pair_evidence_is_merged_conservatively(self):
+        result = {
+            "summary": {"score": 92, "status": "pass", "critical_count": 0, "warning_count": 0},
+            "warnings": [],
+            "population_analysis": {"modules": {
+                "kinship": {"status": "complete", "summary": {"critical_pairs": 1, "warning_pairs": 2}},
+                "pca": {"status": "complete", "summary": {"robust_pc_outliers": 1}},
+                "hwe": {"status": "complete", "summary": {"scoring_enabled": False, "tested_sites": 100, "p_below_profile_threshold": 100}},
+            }},
+        }
+        QualityJobManager._merge_population_evidence(result)
+        codes = {item["code"] for item in result["warnings"]}
+        self.assertIn("POSSIBLE_DUPLICATE_PAIRS", codes)
+        self.assertIn("RELATED_SAMPLE_PAIRS", codes)
+        self.assertIn("PCA_ROBUST_OUTLIERS", codes)
+        self.assertNotIn("HWE_EXCESS_DEVIATION", codes)
+        self.assertEqual(result["summary"]["status"], "critical")
+        self.assertLess(result["summary"]["score"], 92)
 
 
 if __name__ == "__main__":

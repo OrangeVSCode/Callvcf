@@ -205,6 +205,9 @@
               <label class="field"><span>扫描模式</span><select id="qualityScanMode"><option value="smart">智能抽样（推荐）</option><option value="full">完整基因型扫描</option></select><small>两种模式都准确统计总记录数、类型和FILTER。</small></label>
               <label class="field"><span>智能模式目标位点数</span><input id="qualityTargetRecords" type="number" min="1000" max="1000000" step="1000" value="200000"></label>
               <label class="field"><span>报告输出目录</span><div class="resource-input"><input id="qualityOutputDir" type="text" placeholder="留空使用 CallVCF 默认报告目录"><button class="secondary browse-resource" data-target="qualityOutputDir" data-kind="output_dir">选择…</button></div></label>
+              <label class="field span-2"><span>参考基因组 FASTA（可选）</span><div class="resource-input"><input id="qualityReferencePath" type="text" placeholder="用于contig长度与REF核验；建议同时提供同名 .fai"><button class="secondary browse-resource" data-target="qualityReferencePath" data-kind="reference">选择…</button></div><small>未提供时显示为条件模块，不扣分；压缩FASTA仅做文件审计。</small></label>
+              <label class="field"><span>样本元数据 TSV/CSV（可选）</span><div class="resource-input"><input id="qualitySampleMetaPath" type="text" placeholder="sample_id、group/variety、batch"><button class="secondary browse-resource" data-target="qualitySampleMetaPath" data-kind="sample_meta">选择…</button></div></label>
+              <label class="field"><span>重复区/黑名单 BED（可选）</span><div class="resource-input"><input id="qualityRegionBedPath" type="text" placeholder="BED前三列；可含第4列区域名称"><button class="secondary browse-resource" data-target="qualityRegionBedPath" data-kind="bed">选择…</button></div></label>
             </div>
           </section>
           <details class="quality-config-card" open>
@@ -229,7 +232,7 @@
           </details>
           <section class="quality-config-card">
             <h4>群体遗传分析模块</h4>
-            <p class="sub">使用内置PLINK 1.9建立二等位、缺失率和MAF过滤后的标记面板。HWE会按Profile标注“可解释”或“仅描述”；PCA、IBD/PI_HAT、LD与ROH默认不参与质量扣分。</p>
+            <p class="sub">使用内置PLINK 1.9建立二等位、缺失率和MAF过滤后的标记面板。PCA和亲缘分析会LD剪枝；LD衰减使用未剪枝的QC面板，避免人为压低r²。HWE按Profile解释，其余默认不参与质量扣分。</p>
             <div class="module-check-grid">
               <label><input id="populationHwe" type="checkbox" checked><span><b>HWE</b><small>位点检验；棉花/自交/多倍体仅描述</small></span></label>
               <label><input id="populationPca" type="checkbox" checked><span><b>PCA</b><small>LD剪枝标记面板与主成分表</small></span></label>
@@ -251,10 +254,11 @@
             <h4>安全自动修复执行器</h4>
             <p class="sub" id="repairAvailability">正在检测bcftools…</p>
             <div class="advanced-grid">
-              <label class="field"><span>操作</span><select id="repairAction"><option value="index">建立缺失索引</option><option value="sort_copy">生成排序后的新副本</option><option value="normalize_copy">生成标准化的新副本（需二次确认）</option><option value="fill_tags_copy">补全统计标签的新副本（需二次确认）</option><option value="filter_copy">生成过滤后的新副本（需二次确认）</option></select></label>
+              <label class="field"><span>操作</span><select id="repairAction"><option value="index">建立缺失CSI索引</option><option value="sort_copy">生成排序后的新副本</option><option value="normalize_copy">生成标准化/拆分的新副本（需二次确认）</option><option value="fill_tags_copy">补全统计标签的新副本（需二次确认）</option><option value="deduplicate_copy">移除完全重复记录的新副本（需二次确认）</option><option value="subset_samples_copy">保留指定样本的新副本（需二次确认）</option><option value="mask_genotypes_copy">低质量GT设为缺失的新副本（需二次确认）</option><option value="filter_copy">按条件保留位点的新副本（需二次确认）</option></select></label>
               <label class="field span-2 repair-output-field hidden"><span>新输出VCF.GZ</span><div class="resource-input"><input id="repairOutputPath" type="text" placeholder="必须是尚不存在的新路径"><button class="secondary browse-resource" data-target="repairOutputPath" data-kind="repair_output">选择…</button></div></label>
               <label class="field span-2 repair-reference-field hidden"><span>参考基因组FASTA</span><div class="resource-input"><input id="repairReferencePath" type="text"><button class="secondary browse-resource" data-target="repairReferencePath" data-kind="reference">选择…</button></div></label>
-              <label class="field span-2 repair-expression-field hidden"><span>bcftools过滤表达式</span><input id="repairExpression" type="text" placeholder="例如：QUAL>=30 &amp;&amp; F_MISSING&lt;0.1"></label>
+              <label class="field span-2 repair-samples-field hidden"><span>要保留的样本ID</span><textarea id="repairSamples" rows="4" placeholder="每行一个样本，或用逗号分隔"></textarea></label>
+              <label class="field span-2 repair-expression-field hidden"><span id="repairExpressionLabel">bcftools表达式</span><input id="repairExpression" type="text" placeholder="例如：QUAL>=30 &amp;&amp; F_MISSING&lt;0.1"></label>
             </div>
             <div class="button-row"><button class="secondary hidden" id="repairCancelBtn">取消执行</button><button class="primary" id="repairPlanBtn">生成并核对执行计划</button></div>
             <div id="repairResult" class="notice">尚未生成计划；任何操作都不会静默修改原VCF。</div>

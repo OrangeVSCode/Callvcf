@@ -726,6 +726,9 @@ function qualityPayload() {
     output_dir: $("qualityOutputDir").value.trim(),
     scan_mode: $("qualityScanMode").value,
     target_records: Number($("qualityTargetRecords").value || 200000),
+    reference_path: $("qualityReferencePath").value.trim(),
+    sample_meta_path: $("qualitySampleMetaPath").value.trim(),
+    region_bed_path: $("qualityRegionBedPath").value.trim(),
     population_options: {
       hwe: $("populationHwe").checked,
       pca: $("populationPca").checked,
@@ -778,7 +781,7 @@ function renderQualityResult(job) {
     范围: x.scope, 对象: x.target, 问题: x.message, 证据: x.evidence, 建议: x.advice,
   }));
   const samples = (data.samples || []).map(x => ({
-    样本: x.sample_id, 缺失率: formatPercent(x.missing_rate), 杂合率: formatPercent(x.het_rate),
+    样本: x.sample_id, Group: x.group || "—", Batch: x.batch || "—", 样本分: x.sample_score ?? "—", 状态: x.sample_status || "—", 缺失率: formatPercent(x.missing_rate), 杂合率: formatPercent(x.het_rate),
     中位DP: x.median_dp ?? "—", 中位GQ: x.median_gq ?? "—", AB异常: formatPercent(x.ab_outlier_rate),
     倍性不符: formatPercent(x.ploidy_mismatch_rate),
   }));
@@ -799,10 +802,10 @@ function renderQualityResult(job) {
     <div class="meta-card"><span>Warning</span><strong>${formatNumber(summary.warning_count)}</strong></div>
   </div>
   <div class="notice"><b>${escapeHtml(data.profile.name)}</b> · 生物学倍性 ${data.profile.ploidy} · GT编码倍性 ${data.profile.effective_gt_ploidy ?? "未识别"} · ${scan.mode === "full" ? "完整扫描" : `智能抽样 ${formatPercent(scan.sampling_fraction)}`} · ${escapeHtml(scan.method_note)}</div>
-  <div class="quality-section"><h4>HWE、PCA、亲缘关系、LD与ROH</h4><p class="sub">HWE按物种Profile解释；棉花/自交/多倍体只做描述。亲缘关系为PLINK 1.9 IBD/PI_HAT，其余模块默认不参与质量扣分。</p>${genericTable(populationRows, ["模块","状态","解释口径","摘要","文件"])}</div>
+  <div class="quality-section"><h4>HWE、PCA、亲缘关系、LD与ROH</h4><p class="sub">HWE按物种Profile解释；棉花/自交/多倍体只做描述。PCA/亲缘使用LD剪枝面板，LD衰减使用未剪枝QC面板；亲缘估计为PLINK 1.9 IBD/PI_HAT。</p>${genericTable(populationRows, ["模块","状态","解释口径","摘要","文件"])}</div>
   <div class="quality-section"><h4>报告下载</h4><div class="artifact-list">${artifactLinks}</div><small>HTML可离线交互和打印为PDF；ZIP包含HTML、JSON、TSV与运行审计文件。</small></div>
   <div class="quality-section"><h4>告警明细（页面最多显示200条，完整内容见 warnings.tsv）</h4>${genericTable(warnings, ["级别","范围","对象","问题","证据","建议"])}</div>
-  <div class="quality-section"><h4>样本指标</h4>${genericTable(samples, ["样本","缺失率","杂合率","中位DP","中位GQ","AB异常","倍性不符"])}</div>`;
+  <div class="quality-section"><h4>样本指标</h4>${genericTable(samples, ["样本","Group","Batch","样本分","状态","缺失率","杂合率","中位DP","中位GQ","AB异常","倍性不符"])}</div>`;
 }
 
 async function pollQuality(runId) {
@@ -893,7 +896,15 @@ function updateRepairFields() {
   const action = $("repairAction").value;
   $("repairExecutorCard").querySelector(".repair-output-field").classList.toggle("hidden", action === "index");
   $("repairExecutorCard").querySelector(".repair-reference-field").classList.toggle("hidden", action !== "normalize_copy");
-  $("repairExecutorCard").querySelector(".repair-expression-field").classList.toggle("hidden", action !== "filter_copy");
+  $("repairExecutorCard").querySelector(".repair-expression-field").classList.toggle("hidden", !["filter_copy", "mask_genotypes_copy"].includes(action));
+  $("repairExecutorCard").querySelector(".repair-samples-field").classList.toggle("hidden", action !== "subset_samples_copy");
+  if (action === "mask_genotypes_copy") {
+    $("repairExpressionLabel").textContent = "要掩蔽为缺失的GT条件";
+    $("repairExpression").placeholder = "例如：FMT/DP<5 || FMT/GQ<20";
+  } else {
+    $("repairExpressionLabel").textContent = "要保留位点的bcftools表达式";
+    $("repairExpression").placeholder = "例如：QUAL>=30 && F_MISSING<0.1";
+  }
 }
 
 function renderRepairPlan(plan) {
@@ -911,7 +922,7 @@ async function createRepairPlan() {
   try {
     const plan = await api("/api/repair/plan", {
       action: $("repairAction").value, path: currentPath(), output_path: $("repairOutputPath").value.trim(),
-      reference_path: $("repairReferencePath").value.trim(), expression: $("repairExpression").value.trim(),
+      reference_path: $("repairReferencePath").value.trim(), expression: $("repairExpression").value.trim(), samples: $("repairSamples").value.trim(),
     });
     state.repairPlan = plan; renderRepairPlan(plan);
     if (plan.risk === "dangerous") showDangerRepairPolicy(plan);
@@ -923,7 +934,7 @@ async function pollRepair(planId) {
   clearTimeout(state.repairPoll);
   try {
     const job = await api("/api/repair/status", {plan_id: planId});
-    $("repairResult").innerHTML = `<b>${escapeHtml(job.message)}</b> · ${job.progress ?? 0}%${job.error ? `<br>${escapeHtml(job.error)}` : ""}${job.result ? `<br>输出：${escapeHtml(job.result.output_path || job.result.index_path)}<br>审计日志：${escapeHtml(job.result.audit_log)}` : ""}`;
+    $("repairResult").innerHTML = `<b>${escapeHtml(job.message)}</b> · ${job.progress ?? 0}%${job.error ? `<br>${escapeHtml(job.error)}` : ""}${job.result ? `<br>输出：${escapeHtml(job.result.output_path || job.result.index_path)}<br>审计日志：${escapeHtml(job.result.audit_log)}${job.result.before_stats ? `<br>修复前后统计：${escapeHtml(job.result.before_stats)} · ${escapeHtml(job.result.after_stats)}<br>清单：${escapeHtml(job.result.manifest)}` : ""}` : ""}`;
     if (["complete","failed","cancelled"].includes(job.status)) {
       $("repairPlanBtn").disabled = !state.repairCatalog?.available; $("repairCancelBtn").classList.add("hidden");
       toast(job.status === "complete" ? "安全修复已完成" : job.message, job.status !== "complete");

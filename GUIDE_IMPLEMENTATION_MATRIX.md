@@ -8,16 +8,19 @@
 - SNP、INDEL、MNP、SVTYPE/BND/CNV 分类，FILTER、Ti/Tv、MAF、位点缺失率和 1 Mb 密度热点。
 - QUAL、QD、MQ、FS、SOR、MQRankSum、ReadPosRankSum 的覆盖率和分位数。
 - 样本 call rate、缺失率、DP、GQ、AB、杂合率、GT 倍性和相位率。
-- 基于规范化双等位、缺失率/MAF过滤且LD剪枝面板的 HWE、PCA、IBD/PI_HAT、IBS、基因型不一致率、差异分、最近邻、近交系数F、LD衰减和ROH。
+- 基于规范化双等位、缺失率/MAF过滤面板的 HWE、PCA、IBD/PI_HAT、IBS、基因型不一致率、差异分、最近邻、近交系数F、LD衰减和ROH；PCA/亲缘使用LD剪枝面板，LD衰减使用未剪枝QC面板。
+- PCA稳健距离离群、样本相似度摘要、亲缘连通分量，并将适用的样本对/HWE证据保守合入总报告。
+- 可选FASTA+.fai的REF/contig长度核验、样本Group/Batch元数据分层、BED/BED.GZ区域重叠、ANN/CSQ/BCSQ注释覆盖与后果统计。
+- 棉花/多倍体A/D亚基因组统计及结合杂合率、等位平衡和深度的疑似假杂合窗口。
 - SV 长度、IMPRECISE、CIPOS/CIEND 和支持证据字段覆盖率。
 - HTML、JSON、TSV、ZIP、运行清单、告警表、推荐过滤表；HTML可打印/另存PDF。
-- bcftools 两阶段安全执行器：索引、排序副本、标准化/拆分副本、统计标签副本、表达式过滤副本；永不覆盖源文件或已有目标。
+- bcftools 两阶段安全执行器：CSI索引、排序副本、标准化/拆分副本、统计标签副本、精确去重、样本子集、条件掩蔽GT、表达式过滤副本；永不覆盖源文件或已有目标，并生成修复前后stats与JSON清单。
 
 ## 有额外输入时可用
 
 - GFF3/GTF 基因位置、基因结构轨道；ANN/CSQ/BCSQ 或外部表的功能后果；蛋白结构域；GWAS `.ps` 与表型联动：在 Lead 位点高级分析页使用。
 - LDBlockShow 正式 block、R²/D′ 区域图：安装后在 Lead 位点高级分析页使用。
-- FASTA 的逐位点 REF 一致性与 build 验证、样本表驱动的品种内/批次分析、BED 重复区/黑名单重叠：报告目前明确标为 `conditional`，下一阶段接入专用输入框与规则。
+- FASTA、样本表、BED 已接入专用输入框；未提供时运行时状态为 `conditional`，提供后输出独立审计结果与表格。
 
 ## 不由 VCF 单独下结论
 

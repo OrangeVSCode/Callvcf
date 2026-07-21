@@ -1,6 +1,7 @@
 """Two-phase, no-overwrite VCF repair executor backed by bcftools."""
 
 import os
+import json
 import shutil
 import subprocess
 import threading
@@ -16,6 +17,9 @@ ACTIONS = {
     "sort_copy": {"name": "生成排序后的新副本", "risk": "safe", "needs_output": True},
     "normalize_copy": {"name": "生成标准化的新副本", "risk": "dangerous", "needs_output": True, "needs_reference": True},
     "fill_tags_copy": {"name": "补全AC/AN/AF/MAF/NS/F_MISSING/HWE/ExcHet统计标签的新副本", "risk": "dangerous", "needs_output": True},
+    "deduplicate_copy": {"name": "移除完全重复记录的新副本", "risk": "dangerous", "needs_output": True},
+    "subset_samples_copy": {"name": "保留指定样本的新副本", "risk": "dangerous", "needs_output": True, "needs_samples": True},
+    "mask_genotypes_copy": {"name": "按条件将低质量GT设为缺失的新副本", "risk": "dangerous", "needs_output": True, "needs_expression": True},
     "filter_copy": {"name": "生成过滤后的新副本", "risk": "dangerous", "needs_output": True, "needs_expression": True},
 }
 
@@ -106,14 +110,26 @@ class RepairExecutor:
                 raise VCFError("过滤表达式不能为空")
             if len(expression) > 2000 or "\x00" in expression:
                 raise VCFError("过滤表达式无效或过长")
+        samples = []
+        if action.get("needs_samples"):
+            raw_samples = payload.get("samples") or ""
+            if isinstance(raw_samples, list):
+                raw_samples = "\n".join(str(x) for x in raw_samples)
+            samples = [x.strip() for x in str(raw_samples).replace(",", "\n").replace(";", "\n").splitlines() if x.strip()]
+            samples = list(dict.fromkeys(samples))
+            if not samples:
+                raise VCFError("请至少输入一个要保留的样本ID")
+            if len(samples) > 10000 or any(len(x) > 300 or "\x00" in x for x in samples):
+                raise VCFError("样本列表过大或包含无效ID")
 
         plan_id = uuid.uuid4().hex
         phrase = "确认执行-{}".format(plan_id[:8]) if action["risk"] == "dangerous" else None
-        command = self._command_preview(action_id, source, output, reference, expression)
+        command = self._command_preview(action_id, source, output, reference, expression, samples)
         plan = {
             "id": plan_id, "action": action_id, "action_name": action["name"], "risk": action["risk"],
             "source": str(source), "output": str(output) if output else None,
             "reference": str(reference) if reference else None, "expression": expression or None,
+            "samples": samples,
             "command_preview": command, "confirmation_phrase": phrase,
             "created_at": time.time(), "expires_at": time.time() + 900,
             "source_size": source.stat().st_size, "source_mtime_ns": source.stat().st_mtime_ns,
@@ -123,7 +139,7 @@ class RepairExecutor:
             self._plans[plan_id] = plan
         return self._public_plan(plan)
 
-    def _command_preview(self, action, source, output, reference, expression):
+    def _command_preview(self, action, source, output, reference, expression, samples):
         bcftools = "wsl.exe -e {}".format(self.bcftools) if self.backend_mode == "wsl" else str(self.bcftools)
         if action == "index":
             return [bcftools, "index", "-t", str(source)]
@@ -133,6 +149,12 @@ class RepairExecutor:
             return [bcftools, "norm", "-f", str(reference), "-m", "-any", "-Oz", "-o", "<temporary-output>", str(source)]
         if action == "fill_tags_copy":
             return [bcftools, "+fill-tags", str(source), "-Oz", "-o", "<temporary-output>", "--", "-t", "AC,AN,AF,MAF,NS,F_MISSING,HWE,ExcHet"]
+        if action == "deduplicate_copy":
+            return [bcftools, "norm", "-d", "exact", "-Oz", "-o", "<temporary-output>", str(source)]
+        if action == "subset_samples_copy":
+            return [bcftools, "view", "-s", ",".join(samples), "-Oz", "-o", "<temporary-output>", str(source)]
+        if action == "mask_genotypes_copy":
+            return [bcftools, "+setGT", str(source), "-Oz", "-o", "<temporary-output>", "--", "-t", "q", "-n", ".", "-i", expression]
         return [bcftools, "view", "-i", expression, "-Oz", "-o", "<temporary-output>", str(source)]
 
     def _translate_wsl_path(self, value):
@@ -211,14 +233,14 @@ class RepairExecutor:
             log_path = audit_root / "repair.log"
             with log_path.open("wb") as log:
                 if plan["action"] == "index":
-                    suffix = ".tbi"
+                    suffix = ".csi"
                     final_index = Path(str(source) + suffix)
-                    alternate = Path(str(source) + ".csi")
+                    alternate = Path(str(source) + ".tbi")
                     if final_index.exists() or alternate.exists():
                         raise VCFError("索引已存在；安全策略不会覆盖现有索引")
                     partial_index = audit_root / (source.name + suffix + ".partial")
                     self._run_process(self._bcftools_command(
-                        ["index", "-t", "-o", str(partial_index), str(source)], path_indexes=(3, 4)
+                        ["index", "-c", "-o", str(partial_index), str(source)], path_indexes=(3, 4)
                     ), log, job["cancel"])
                     if final_index.exists() or alternate.exists():
                         raise VCFError("执行期间出现索引文件；已阻止覆盖")
@@ -231,17 +253,31 @@ class RepairExecutor:
                     command = self._build_command(plan, partial)
                     self._run_process(command, log, job["cancel"])
                     job["progress"] = 75; job["message"] = "正在校验并建立新文件索引"
+                    partial_index = Path(str(partial) + ".csi")
                     self._run_process(self._bcftools_command(
-                        ["index", "-t", str(partial)], path_indexes=(2,)
+                        ["index", "-c", "-o", str(partial_index), str(partial)], path_indexes=(3, 4)
                     ), log, job["cancel"])
-                    partial_index = Path(str(partial) + ".tbi")
                     if not partial.is_file() or not partial_index.is_file() or not partial.stat().st_size:
                         raise VCFError("bcftools未生成完整输出和索引")
-                    if output.exists() or Path(str(output) + ".tbi").exists():
+                    if output.exists() or Path(str(output) + ".tbi").exists() or Path(str(output) + ".csi").exists():
                         raise VCFError("执行期间目标路径已出现；已阻止覆盖")
+                    before_stats = audit_root / "before.bcftools.stats.txt"
+                    after_stats = audit_root / "after.bcftools.stats.txt"
+                    self._run_to_file(self._bcftools_command(["stats", str(source)], path_indexes=(1,)), before_stats, log, job["cancel"])
+                    self._run_to_file(self._bcftools_command(["stats", str(partial)], path_indexes=(1,)), after_stats, log, job["cancel"])
+                    manifest_path = audit_root / "repair_manifest.json"
+                    manifest = {
+                        "plan_id": plan["id"], "action": plan["action"], "action_name": plan["action_name"],
+                        "source": str(source), "source_size": source.stat().st_size,
+                        "output": str(output), "output_size": partial.stat().st_size,
+                        "backend": self.catalog().get("backend"), "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "before_stats": str(before_stats), "after_stats": str(after_stats),
+                        "source_overwritten": False,
+                    }
+                    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
                     os.replace(str(partial), str(output))
-                    os.replace(str(partial_index), str(output) + ".tbi")
-                    job["result"] = {"output_path": str(output), "index_path": str(output) + ".tbi", "audit_log": str(log_path)}
+                    os.replace(str(partial_index), str(output) + ".csi")
+                    job["result"] = {"output_path": str(output), "index_path": str(output) + ".csi", "audit_log": str(log_path), "before_stats": str(before_stats), "after_stats": str(after_stats), "manifest": str(manifest_path)}
             job["status"] = "complete"; job["message"] = "安全修复已完成"; job["progress"] = 100
             plan["status"] = "complete"
         except Exception as exc:
@@ -269,10 +305,28 @@ class RepairExecutor:
                 ["+fill-tags", source, "-Oz", "-o", str(partial), "--", "-t", "AC,AN,AF,MAF,NS,F_MISSING,HWE,ExcHet"],
                 path_indexes=(1, 4),
             )
+        if plan["action"] == "deduplicate_copy":
+            return self._bcftools_command(["norm", "-d", "exact", "-Oz", "-o", str(partial), source], path_indexes=(5, 6))
+        if plan["action"] == "subset_samples_copy":
+            return self._bcftools_command(["view", "-s", ",".join(plan["samples"]), "-Oz", "-o", str(partial), source], path_indexes=(5, 6))
+        if plan["action"] == "mask_genotypes_copy":
+            return self._bcftools_command(["+setGT", source, "-Oz", "-o", str(partial), "--", "-t", "q", "-n", ".", "-i", plan["expression"]], path_indexes=(1, 4))
         return self._bcftools_command(
             ["view", "-i", plan["expression"], "-Oz", "-o", str(partial), source],
             path_indexes=(5, 6),
         )
+
+    def _run_to_file(self, command, destination, log, cancel):
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        with Path(destination).open("wb") as output:
+            proc = subprocess.Popen(command, stdout=output, stderr=log, creationflags=creationflags)
+            while proc.poll() is None:
+                if cancel.is_set():
+                    proc.kill(); proc.wait()
+                    raise VCFError("修复任务已取消")
+                time.sleep(.15)
+        if proc.returncode:
+            raise VCFError("bcftools stats审计失败（退出码{}）".format(proc.returncode))
 
     def status(self, plan_id):
         with self._lock:

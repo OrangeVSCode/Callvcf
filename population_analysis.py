@@ -118,7 +118,7 @@ class PopulationAnalyzer:
             "hwe": self._module(options["hwe"], hwe_interpretation),
             "pca": self._module(options["pca"]),
             "kinship": self._module(options["kinship"], "IBD_PI_HAT_not_KING"),
-            "ld": self._module(options["ld"], "pruned_panel_ld_decay"),
+            "ld": self._module(options["ld"], "QC_filtered_unpruned_panel_ld_decay"),
             "roh": self._module(options["roh"], "exploratory_non_scoring"),
         }
         result = {
@@ -172,7 +172,7 @@ class PopulationAnalyzer:
 
         prune_prefix = work / "prune"
         prune_ids = []
-        need_prune = any(options[x] for x in ("pca", "kinship", "ld"))
+        need_prune = any(options[x] for x in ("pca", "kinship"))
         if need_prune:
             try:
                 if progress:
@@ -196,7 +196,7 @@ class PopulationAnalyzer:
             if cancel is not None and cancel.is_set():
                 raise VCFError("群体分析已取消")
             try:
-                if name in {"pca", "kinship", "ld"} and not prune_ids:
+                if name in {"pca", "kinship"} and not prune_ids:
                     raise VCFError("LD剪枝后没有足够标记")
                 if progress:
                     progress(percent, "正在计算{}".format({"hwe":"HWE", "pca":"PCA", "kinship":"亲缘关系/IBD", "ld":"LD衰减", "roh":"ROH"}[name]))
@@ -226,6 +226,9 @@ class PopulationAnalyzer:
             parsed.append({"chrom": row.get("CHR"), "variant_id": row.get("SNP"), "test": row.get("TEST"), "obs_het": row.get("O(HET)"), "exp_het": row.get("E(HET)"), "p": p})
         out = _write_tsv(run_dir / "hwe_sites.tsv", parsed, ["chrom", "variant_id", "test", "obs_het", "exp_het", "p"])
         p_values = [x["p"] for x in parsed if x["p"] is not None]
+        ordered = sorted(max(value, 1e-300) for value in p_values)
+        qq_rows = [{"rank": index + 1, "expected_p": (index + .5) / max(len(ordered), 1), "observed_p": value, "expected_log10p": -math.log10((index + .5) / max(len(ordered), 1)), "observed_log10p": -math.log10(value)} for index, value in enumerate(ordered)]
+        qq_out = _write_tsv(run_dir / "hwe_qq.tsv", qq_rows, ["rank", "expected_p", "observed_p", "expected_log10p", "observed_log10p"])
         module["summary"] = {
             "tested_sites": len(p_values),
             "p_below_profile_threshold": sum(p < threshold for p in p_values) if threshold is not None else None,
@@ -233,7 +236,7 @@ class PopulationAnalyzer:
             "scoring_enabled": module["interpretation"] == "quality_context",
         }
         module["preview"] = sorted(parsed, key=lambda x: x["p"] if x["p"] is not None else 2)[:20]
-        module["artifacts"] = [out.name]
+        module["artifacts"] = [out.name, qq_out.name]
 
     def _pca(self, panel, prune_prefix, prune_ids, options, module, run_dir, cancel):
         with Path(str(panel) + ".fam").open("r", encoding="utf-8", errors="replace") as handle:
@@ -255,12 +258,25 @@ class PopulationAnalyzer:
         eigen = [x for x in eigen if x is not None]
         total = sum(eigen)
         explained = [x / total if total else None for x in eigen]
-        fields = ["sample_id"] + ["PC{}".format(x) for x in range(1, components + 1)]
+        if parsed and components >= 2:
+            pc1 = [x["PC1"] for x in parsed if x.get("PC1") is not None]
+            pc2 = [x["PC2"] for x in parsed if x.get("PC2") is not None]
+            med1, med2 = statistics.median(pc1), statistics.median(pc2)
+            mad1 = statistics.median(abs(x - med1) for x in pc1) or 1e-12
+            mad2 = statistics.median(abs(x - med2) for x in pc2) or 1e-12
+            for item in parsed:
+                item["robust_pc_distance"] = math.sqrt(((item["PC1"] - med1) / (1.4826 * mad1)) ** 2 + ((item["PC2"] - med2) / (1.4826 * mad2)) ** 2)
+            distances = sorted(x["robust_pc_distance"] for x in parsed)
+            cutoff = distances[max(0, math.ceil(.99 * len(distances)) - 1)]
+            for item in parsed:
+                item["pca_outlier"] = item["robust_pc_distance"] >= cutoff and len(parsed) >= 20
+        fields = ["sample_id"] + ["PC{}".format(x) for x in range(1, components + 1)] + ["robust_pc_distance", "pca_outlier"]
         out = _write_tsv(run_dir / "pca_scores.tsv", parsed, fields)
+        outlier_out = _write_tsv(run_dir / "pca_outliers.tsv", [x for x in parsed if x.get("pca_outlier")], fields)
         eigen_out = _write_tsv(run_dir / "pca_eigenvalues.tsv", [{"component": "PC{}".format(i + 1), "eigenvalue": value, "explained_fraction": explained[i]} for i, value in enumerate(eigen)], ["component", "eigenvalue", "explained_fraction"])
-        module["summary"] = {"samples": len(parsed), "components": components, "pc1_relative_to_reported": explained[0] if explained else None, "pc2_relative_to_reported": explained[1] if len(explained) > 1 else None}
+        module["summary"] = {"samples": len(parsed), "components": components, "pc1_relative_to_reported": explained[0] if explained else None, "pc2_relative_to_reported": explained[1] if len(explained) > 1 else None, "robust_pc_outliers": sum(bool(x.get("pca_outlier")) for x in parsed)}
         module["preview"] = parsed[:1000]
-        module["artifacts"] = [out.name, eigen_out.name]
+        module["artifacts"] = [out.name, eigen_out.name, outlier_out.name]
 
     def _kinship(self, panel, prune_prefix, prune_ids, options, module, run_dir, cancel):
         prefix = Path(panel).parent / "kinship"
@@ -321,21 +337,51 @@ class PopulationAnalyzer:
             for rank, (_, other, pair) in enumerate(sorted(candidates, reverse=True)[:10], 1):
                 nearest.append({"sample_id": sample_id, "rank": rank, "neighbor": other, "ibs_similarity": pair["ibs_similarity"], "pi_hat": pair["pi_hat"], "genotype_discordance": pair["genotype_discordance"], "difference_score": pair["difference_score"], "warning_level": pair["warning_level"]})
         nearest_out = _write_tsv(run_dir / "sample_nearest_neighbors.tsv", nearest, ["sample_id", "rank", "neighbor", "ibs_similarity", "pi_hat", "genotype_discordance", "difference_score", "warning_level"])
+        sample_summary = []
+        for sample_id in sample_ids:
+            pairs = [x for x in parsed if sample_id in {x["sample_1"], x["sample_2"]}]
+            similarities = [x["ibs_similarity"] for x in pairs if x["ibs_similarity"] is not None]
+            differences = [x["difference_score"] for x in pairs if x["difference_score"] is not None]
+            sample_summary.append({"sample_id": sample_id, "pair_count": len(pairs), "median_ibs_similarity": statistics.median(similarities) if similarities else None, "median_difference_score": statistics.median(differences) if differences else None, "critical_neighbors": sum(x["warning_level"] == "critical" for x in pairs), "warning_neighbors": sum(x["warning_level"] == "warning" for x in pairs)})
+        summary_out = _write_tsv(run_dir / "sample_similarity_summary.tsv", sample_summary, ["sample_id", "pair_count", "median_ibs_similarity", "median_difference_score", "critical_neighbors", "warning_neighbors"])
+        parent = {sample_id: sample_id for sample_id in sample_ids}
+        def find(value):
+            while parent[value] != value:
+                parent[value] = parent[parent[value]]
+                value = parent[value]
+            return value
+        def union(left, right):
+            a, b = find(left), find(right)
+            if a != b:
+                parent[b] = a
+        for pair in parsed:
+            if pair["warning_level"] in {"critical", "warning"}:
+                union(pair["sample_1"], pair["sample_2"])
+        components_map = {}
+        for sample_id in sample_ids:
+            components_map.setdefault(find(sample_id), []).append(sample_id)
+        component_rows = []
+        for index, members in enumerate(sorted((x for x in components_map.values() if len(x) > 1), key=lambda x: (-len(x), x)), 1):
+            for member in sorted(members):
+                component_rows.append({"component_id": "REL{}".format(index), "component_size": len(members), "sample_id": member})
+        components_out = _write_tsv(run_dir / "relatedness_components.tsv", component_rows, ["component_id", "component_size", "sample_id"])
         het_prefix = Path(panel).parent / "inbreeding"
         self._run(["--bfile", panel, "--allow-extra-chr", "--extract", str(prune_prefix) + ".prune.in", "--het", "--out", het_prefix], cancel, "样本近交系数F")
         het_rows = [{"sample_id": x.get("IID"), "observed_homozygotes": _int(x.get("O(HOM)")), "expected_homozygotes": _float(x.get("E(HOM)")), "nonmissing_autosomal": _int(x.get("N(NM)")), "inbreeding_f": _float(x.get("F"))} for x in _read_space_table(str(het_prefix) + ".het")]
         het_out = _write_tsv(run_dir / "sample_inbreeding.tsv", het_rows, ["sample_id", "observed_homozygotes", "expected_homozygotes", "nonmissing_autosomal", "inbreeding_f"])
-        module["summary"] = {"pairs": len(parsed), "critical_pairs": sum(x["warning_level"] == "critical" for x in parsed), "warning_pairs": sum(x["warning_level"] == "warning" for x in parsed), "pi_hat_ge_0_9": sum((x["pi_hat"] or 0) >= .9 for x in parsed), "samples_with_f": len(het_rows), "estimator": "PLINK1.9 IBD PI_HAT + IBS DST; not KING"}
+        module["summary"] = {"pairs": len(parsed), "critical_pairs": sum(x["warning_level"] == "critical" for x in parsed), "warning_pairs": sum(x["warning_level"] == "warning" for x in parsed), "pi_hat_ge_0_9": sum((x["pi_hat"] or 0) >= .9 for x in parsed), "related_components": len({x["component_id"] for x in component_rows}), "samples_with_f": len(het_rows), "estimator": "PLINK1.9 IBD PI_HAT + IBS DST; not KING"}
         module["preview"] = parsed[:20]
-        module["artifacts"] = [out.name, suspicious.name, nearest_out.name, het_out.name]
+        module["artifacts"] = [out.name, suspicious.name, nearest_out.name, summary_out.name, components_out.name, het_out.name]
 
     def _ld(self, panel, prune_prefix, prune_ids, options, module, run_dir, cancel):
         maximum = max(2, min(20000, int(options["ld_max_markers"])))
-        if len(prune_ids) <= maximum:
-            selected = prune_ids
+        with Path(str(panel) + ".bim").open("r", encoding="utf-8", errors="replace") as handle:
+            panel_ids = [values[1] for values in (line.split() for line in handle) if len(values) >= 2]
+        if len(panel_ids) <= maximum:
+            selected = panel_ids
         else:
-            step = len(prune_ids) / maximum
-            selected = [prune_ids[min(len(prune_ids) - 1, int(i * step))] for i in range(maximum)]
+            step = len(panel_ids) / maximum
+            selected = [panel_ids[min(len(panel_ids) - 1, int(i * step))] for i in range(maximum)]
         if len(selected) < 2:
             raise VCFError("用于LD衰减的剪枝标记少于2个")
         marker_file = Path(panel).parent / "ld_markers.txt"
@@ -371,7 +417,7 @@ class PopulationAnalyzer:
             current = values[bounds]
             parsed.append({"distance_bin_kb": "{}-{}".format(*bounds), "pair_count": len(current), "mean_r2": statistics.fmean(current) if current else None, "median_r2": statistics.median(current) if current else None})
         out = _write_tsv(run_dir / "ld_decay.tsv", parsed, ["distance_bin_kb", "pair_count", "mean_r2", "median_r2"])
-        module["summary"] = {"markers": len(selected), "pairs": sum(x["pair_count"] for x in parsed), "window_kb": int(options["ld_window_kb"]), "panel": "LD-pruned uniformly capped panel"}
+        module["summary"] = {"markers": len(selected), "pairs": sum(x["pair_count"] for x in parsed), "window_kb": int(options["ld_window_kb"]), "panel": "QC-filtered biallelic uniformly capped panel (not LD-pruned)"}
         module["preview"] = parsed
         module["artifacts"] = [out.name]
 

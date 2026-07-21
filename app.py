@@ -37,6 +37,8 @@ def _windows_dialog(kind="file", initial_dir=None):
         "vcf": "Variant files|*.vcf;*.vcf.gz;*.vcf.bgz;*.bcf|All files|*.*",
         "gff": "Gene annotation|*.gff;*.gff3;*.gtf;*.gff.gz;*.gff3.gz;*.gtf.gz|All files|*.*",
         "annotation": "Annotation table|*.tsv;*.csv;*.txt;*.gz|All files|*.*",
+        "sample_meta": "Sample metadata|*.tsv;*.csv;*.txt|All files|*.*",
+        "bed": "BED regions|*.bed;*.bed.gz;*.tsv;*.txt|All files|*.*",
         "domain": "Domain table|*.tsv;*.csv;*.txt;*.gz|All files|*.*",
         "phenotype": "Phenotype PS|*.ps|All files|*.*",
         "reference": "Reference FASTA|*.fa;*.fasta;*.fna;*.fa.gz;*.fasta.gz|All files|*.*",
@@ -112,6 +114,8 @@ def select_resource(kind="file", initial_dir=None):
             filters = {
                 "gff": [("Gene annotation", "*.gff *.gff3 *.gtf *.gff.gz *.gff3.gz *.gtf.gz"), ("All files", "*.*")],
                 "annotation": [("Annotation table", "*.tsv *.csv *.txt *.gz"), ("All files", "*.*")],
+                "sample_meta": [("Sample metadata", "*.tsv *.csv *.txt"), ("All files", "*.*")],
+                "bed": [("BED regions", "*.bed *.bed.gz *.tsv *.txt"), ("All files", "*.*")],
                 "domain": [("Domain table", "*.tsv *.csv *.txt *.gz"), ("All files", "*.*")],
                 "phenotype": [("Phenotype PS", "*.ps"), ("All files", "*.*")],
                 "executable": [("Executable", "*.exe *"), ("All files", "*.*")],
