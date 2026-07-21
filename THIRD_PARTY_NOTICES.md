@@ -16,4 +16,11 @@ CallVCF can download and execute the following independent command-line tools at
 - Platform note: the upstream project supports Linux, Unix and macOS. CallVCF invokes it through WSL on Windows.
 - CallVCF preserves the complete upstream archive, including its license and bundled helper files.
 
+## BCFtools / HTSlib
+
+- Project: https://github.com/samtools/bcftools
+- CallVCF can install the Ubuntu distribution package into the user's WSL environment; it is not silently downloaded during application startup.
+- BCFtools and HTSlib use the MIT/Expat license; optional GPL plugins/features remain subject to their applicable licenses.
+- CallVCF records the managed backend and only reports success after bcftools exits successfully and the new output plus index pass validation.
+
 The tools remain separate programs communicating with CallVCF through files and command-line arguments. Their authors do not endorse CallVCF, and CallVCF does not provide a warranty for third-party software.

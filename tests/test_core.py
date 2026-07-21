@@ -207,6 +207,9 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["scan"]["evaluated_records"], 3)
         self.assertTrue(result["repair_policy"]["dangerous_requires_second_confirmation"])
         self.assertEqual(result["samples"][0]["missing_rate"], 0.0)
+        self.assertIn("quality_field_summaries", result["site_metrics"])
+        self.assertIn("phase_rate", result["samples"][0])
+        self.assertIn("module_availability", result)
         report = render_report(result)
         self.assertIn("VCF质量评估报告", report)
         self.assertIn("打印/另存为PDF", report)
@@ -228,7 +231,7 @@ class CoreTests(unittest.TestCase):
                 time.sleep(0.02)
             self.assertEqual(current["status"], "complete", current.get("error"))
             names = {x["name"] for x in current["artifacts"]}
-            self.assertTrue({"report.html", "report_summary.json", "sample_metrics.tsv", "warnings.tsv", "run_manifest.json", "CallVCF_QC_report.zip"}.issubset(names))
+            self.assertTrue({"report.html", "report_summary.json", "sample_metrics.tsv", "variant_metrics.tsv", "site_metric_summary.tsv", "density_windows.tsv", "module_availability.tsv", "recommend_filters.tsv", "sv_metrics.tsv", "warnings.tsv", "run_manifest.json", "CallVCF_QC_report.zip"}.issubset(names))
             self.assertTrue(manager.artifact(job["id"], "report.html").is_file())
 
     def test_sv_heterozygosity_uses_cohort_outliers(self):
@@ -291,6 +294,13 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(plan["risk"], "dangerous")
         self.assertTrue(plan["confirmation_phrase"].startswith("确认执行-"))
         self.assertIn("<temporary-output>", plan["command_preview"])
+        with tempfile.TemporaryDirectory(prefix="callvcf-repair-tags-") as temp_name:
+            tags_plan = executor.plan({
+                "action": "fill_tags_copy", "path": str(fixture),
+                "output_path": str(Path(temp_name) / "tagged.vcf.gz"),
+            })
+        self.assertIn("+fill-tags", tags_plan["command_preview"])
+        self.assertEqual(tags_plan["risk"], "dangerous")
 
     def test_ld_decay_chart_auto_scales_small_r2_values(self):
         svg = _svg_ld_decay([

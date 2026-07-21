@@ -242,6 +242,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = ADVANCED.sample_lead_profile(payload)
             elif route == "/api/tools/install":
                 result = install_tool(payload.get("tool"))
+                if str(payload.get("tool") or "").lower() == "bcftools":
+                    REPAIR.refresh_backend()
             elif route == "/api/quality/start":
                 result = QUALITY.start(payload)
             elif route == "/api/quality/status":

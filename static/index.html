@@ -151,6 +151,7 @@
             <div class="tool-manager" id="toolManager">
               <div class="tool-card"><div><b>PLINK 1.9</b><small id="plinkStatus">正在检测…</small></div><button class="secondary install-tool" data-tool="plink">一键安装</button></div>
               <div class="tool-card"><div><b>LDBlockShow</b><small id="ldblockshowStatus">正在检测…</small></div><button class="secondary install-tool" data-tool="ldblockshow">一键安装</button></div>
+              <div class="tool-card"><div><b>bcftools</b><small id="bcftoolsStatus">正在检测…</small></div><button class="secondary install-tool" data-tool="bcftools">一键安装</button></div>
               <p class="sub" id="toolRoot"></p>
             </div>
             <div class="resource-grid">
@@ -187,7 +188,7 @@
 
       <div class="tab-pane" id="pane-quality">
         <div class="pane-intro">
-          <div><h3>MultiQC 风格 VCF 深度质量评估</h3><p>按文件、位点、样本和群体四层扫描，输出可离线打开和下载的报告包。</p></div>
+          <div><h3>VCF 深度质量评估</h3><p>按文件、位点、样本和群体四层扫描，输出可离线打开和下载的报告包。</p></div>
           <div class="button-row"><button class="secondary hidden" id="qualityCancelBtn">取消</button><button class="primary" id="qualityRunBtn">开始评估</button></div>
         </div>
         <div class="quality-layout">
@@ -250,7 +251,7 @@
             <h4>安全自动修复执行器</h4>
             <p class="sub" id="repairAvailability">正在检测bcftools…</p>
             <div class="advanced-grid">
-              <label class="field"><span>操作</span><select id="repairAction"><option value="index">建立缺失索引</option><option value="sort_copy">生成排序后的新副本</option><option value="normalize_copy">生成标准化的新副本（需二次确认）</option><option value="filter_copy">生成过滤后的新副本（需二次确认）</option></select></label>
+              <label class="field"><span>操作</span><select id="repairAction"><option value="index">建立缺失索引</option><option value="sort_copy">生成排序后的新副本</option><option value="normalize_copy">生成标准化的新副本（需二次确认）</option><option value="fill_tags_copy">补全统计标签的新副本（需二次确认）</option><option value="filter_copy">生成过滤后的新副本（需二次确认）</option></select></label>
               <label class="field span-2 repair-output-field hidden"><span>新输出VCF.GZ</span><div class="resource-input"><input id="repairOutputPath" type="text" placeholder="必须是尚不存在的新路径"><button class="secondary browse-resource" data-target="repairOutputPath" data-kind="repair_output">选择…</button></div></label>
               <label class="field span-2 repair-reference-field hidden"><span>参考基因组FASTA</span><div class="resource-input"><input id="repairReferencePath" type="text"><button class="secondary browse-resource" data-target="repairReferencePath" data-kind="reference">选择…</button></div></label>
               <label class="field span-2 repair-expression-field hidden"><span>bcftools过滤表达式</span><input id="repairExpression" type="text" placeholder="例如：QUAL>=30 &amp;&amp; F_MISSING&lt;0.1"></label>

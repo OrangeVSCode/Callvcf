@@ -530,10 +530,11 @@ async function browseResource(button) {
 
 function renderToolStatus(data) {
   state.tools = data;
-  const plink = data.plink, ldb = data.ldblockshow;
+  const plink = data.plink, ldb = data.ldblockshow, bcf = data.bcftools;
   $("plinkStatus").textContent = plink.installed ? `已就绪 · ${plink.path}` : `未安装 · ${plink.bundled_version}`;
   $("ldblockshowStatus").textContent = ldb.installed ? (ldb.requires_wsl && !ldb.wsl_available ? `已下载 · 需先安装 WSL` : `已就绪 · ${ldb.path}`) : (ldb.requires_wsl && !ldb.wsl_available ? "未安装 · 需先启用 WSL" : "未安装");
-  $("toolRoot").textContent = `工具目录：${data.tool_root}；PLINK GPL-3.0，LDBlockShow MIT。`;
+  $("bcftoolsStatus").textContent = bcf.installed ? `已就绪 · ${bcf.path}` : (bcf.requires_wsl && !bcf.wsl_available ? "需先完成 Ubuntu/WSL 初始化" : "未安装 · 可一键安装");
+  $("toolRoot").textContent = `工具目录：${data.tool_root}；PLINK GPL-3.0，LDBlockShow MIT，bcftools MIT/Expat（部分插件GPL）。`;
   document.querySelectorAll(".install-tool").forEach(button => {
     const installed = data[button.dataset.tool]?.installed;
     button.textContent = installed ? "重新安装" : "一键安装";
@@ -549,7 +550,7 @@ async function loadToolStatus() {
     if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
     renderToolStatus(result.data);
   } catch (error) {
-    $("plinkStatus").textContent = "检测失败"; $("ldblockshowStatus").textContent = "检测失败";
+    $("plinkStatus").textContent = "检测失败"; $("ldblockshowStatus").textContent = "检测失败"; $("bcftoolsStatus").textContent = "检测失败";
   }
 }
 
@@ -558,7 +559,7 @@ async function installTool(button) {
   button.disabled = true; button.textContent = "正在下载…";
   try {
     const result = await api("/api/tools/install", {tool});
-    renderToolStatus(result); toast(`${tool === "plink" ? "PLINK" : "LDBlockShow"} 安装完成`);
+    renderToolStatus(result); toast(`${tool === "plink" ? "PLINK" : tool === "bcftools" ? "bcftools" : "LDBlockShow"} 安装完成`);
   } catch (error) { toast(error.message, true); button.textContent = oldText; }
   finally { button.disabled = false; }
 }

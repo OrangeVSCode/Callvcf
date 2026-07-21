@@ -15,6 +15,7 @@ ACTIONS = {
     "index": {"name": "建立缺失索引", "risk": "safe", "needs_output": False},
     "sort_copy": {"name": "生成排序后的新副本", "risk": "safe", "needs_output": True},
     "normalize_copy": {"name": "生成标准化的新副本", "risk": "dangerous", "needs_output": True, "needs_reference": True},
+    "fill_tags_copy": {"name": "补全AC/AN/AF/MAF/NS/F_MISSING/HWE/ExcHet统计标签的新副本", "risk": "dangerous", "needs_output": True},
     "filter_copy": {"name": "生成过滤后的新副本", "risk": "dangerous", "needs_output": True, "needs_expression": True},
 }
 
@@ -24,13 +25,24 @@ class RepairExecutor:
         self.bcftools = getattr(service, "bcftools", None)
         self.backend_mode = "native" if self.bcftools else None
         self.wsl = None
+        self.refresh_backend()
+        self._plans = {}
+        self._jobs = {}
+        self._lock = threading.Lock()
+
+    def refresh_backend(self):
+        if self.bcftools and self.backend_mode == "native":
+            return self.catalog() if hasattr(self, "_lock") else None
+        self.bcftools = None
+        self.backend_mode = None
+        self.wsl = None
         if not self.bcftools and os.name == "nt":
             candidate = shutil.which("wsl.exe") or shutil.which("wsl")
             if candidate:
                 try:
                     proc = subprocess.run(
                         [candidate, "-e", "sh", "-lc", "command -v bcftools"],
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", timeout=5,
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                     )
                     resolved = proc.stdout.strip().splitlines()
@@ -40,9 +52,7 @@ class RepairExecutor:
                         self.backend_mode = "wsl"
                 except Exception:
                     pass
-        self._plans = {}
-        self._jobs = {}
-        self._lock = threading.Lock()
+        return self.catalog() if hasattr(self, "_lock") else None
 
     def catalog(self):
         return {
@@ -121,12 +131,14 @@ class RepairExecutor:
             return [bcftools, "sort", "-Oz", "-o", "<temporary-output>", str(source)]
         if action == "normalize_copy":
             return [bcftools, "norm", "-f", str(reference), "-m", "-any", "-Oz", "-o", "<temporary-output>", str(source)]
+        if action == "fill_tags_copy":
+            return [bcftools, "+fill-tags", str(source), "-Oz", "-o", "<temporary-output>", "--", "-t", "AC,AN,AF,MAF,NS,F_MISSING,HWE,ExcHet"]
         return [bcftools, "view", "-i", expression, "-Oz", "-o", "<temporary-output>", str(source)]
 
     def _translate_wsl_path(self, value):
         proc = subprocess.run(
             [self.wsl, "-e", "wslpath", "-a", str(value)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", timeout=5,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if proc.returncode or not proc.stdout.strip():
@@ -251,6 +263,11 @@ class RepairExecutor:
             return self._bcftools_command(
                 ["norm", "-f", plan["reference"], "-m", "-any", "-Oz", "-o", str(partial), source],
                 path_indexes=(2, 7, 8),
+            )
+        if plan["action"] == "fill_tags_copy":
+            return self._bcftools_command(
+                ["+fill-tags", source, "-Oz", "-o", str(partial), "--", "-t", "AC,AN,AF,MAF,NS,F_MISSING,HWE,ExcHet"],
+                path_indexes=(1, 4),
             )
         return self._bcftools_command(
             ["view", "-i", plan["expression"], "-Oz", "-o", str(partial), source],

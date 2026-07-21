@@ -1,6 +1,7 @@
 """Optional PLINK-backed population analyses for CallVCF quality reports."""
 
 import csv
+import bisect
 import math
 import os
 import shutil
@@ -267,16 +268,66 @@ class PopulationAnalyzer:
         rows = _read_space_table(str(prefix) + ".genome")
         parsed = []
         for row in rows:
+            ibs0, ibs1, ibs2 = _int(row.get("IBS0")), _int(row.get("IBS1")), _int(row.get("IBS2"))
+            compared = sum(x or 0 for x in (ibs0, ibs1, ibs2))
+            discordance = ((ibs0 or 0) + (ibs1 or 0)) / compared if compared else None
+            ibs_similarity = _float(row.get("DST"))
+            pi_hat = _float(row.get("PI_HAT"))
             parsed.append({
                 "sample_1": row.get("IID1"), "sample_2": row.get("IID2"),
                 "z0": _float(row.get("Z0")), "z1": _float(row.get("Z1")), "z2": _float(row.get("Z2")),
-                "pi_hat": _float(row.get("PI_HAT")), "ibs_distance": _float(row.get("DST")),
+                "pi_hat": pi_hat, "ibs_similarity": ibs_similarity, "genotype_discordance": discordance,
+                "ibs0": ibs0, "ibs1": ibs1, "ibs2": ibs2,
             })
+        raw_differences = [1 - x["ibs_similarity"] for x in parsed if x["ibs_similarity"] is not None]
+        ranked = sorted(raw_differences)
+        for item in parsed:
+            similarity = item["ibs_similarity"]
+            difference = 1 - similarity if similarity is not None else None
+            if difference is None or not ranked:
+                item["difference_score"] = None
+            else:
+                below = bisect.bisect_left(ranked, difference)
+                equal = bisect.bisect_right(ranked, difference) - below
+                item["difference_score"] = round(100 * (below + .5 * equal) / len(ranked), 3)
+            pi_hat = item["pi_hat"] or 0
+            discordance = item["genotype_discordance"]
+            duplicate_evidence = similarity is not None and similarity >= .98 and discordance is not None and discordance <= .005
+            if pi_hat >= .90 or duplicate_evidence:
+                item["warning_level"] = "critical"
+                item["relationship_hint"] = "疑似重复/同一样本"
+            elif pi_hat >= .375:
+                item["warning_level"] = "warning"
+                item["relationship_hint"] = "约一级亲缘；需结合群体频率复核"
+            elif pi_hat >= .177:
+                item["warning_level"] = "info"
+                item["relationship_hint"] = "约二级亲缘；探索性提示"
+            else:
+                item["warning_level"] = ""
+                item["relationship_hint"] = ""
         parsed.sort(key=lambda x: x["pi_hat"] if x["pi_hat"] is not None else -1, reverse=True)
-        out = _write_tsv(run_dir / "kinship_ibd_pairs.tsv", parsed, ["sample_1", "sample_2", "z0", "z1", "z2", "pi_hat", "ibs_distance"])
-        module["summary"] = {"pairs": len(parsed), "pi_hat_ge_0_125": sum((x["pi_hat"] or 0) >= .125 for x in parsed), "pi_hat_ge_0_25": sum((x["pi_hat"] or 0) >= .25 for x in parsed), "estimator": "PLINK1.9 IBD PI_HAT"}
+        pair_fields = ["sample_1", "sample_2", "z0", "z1", "z2", "pi_hat", "ibs_similarity", "genotype_discordance", "difference_score", "warning_level", "relationship_hint", "ibs0", "ibs1", "ibs2"]
+        out = _write_tsv(run_dir / "pairwise_similarity.tsv", parsed, pair_fields)
+        suspicious = _write_tsv(run_dir / "suspicious_pairs.tsv", [x for x in parsed if x["warning_level"]], pair_fields)
+        nearest = []
+        sample_ids = sorted({x["sample_1"] for x in parsed} | {x["sample_2"] for x in parsed})
+        for sample_id in sample_ids:
+            candidates = []
+            for pair in parsed:
+                if sample_id not in {pair["sample_1"], pair["sample_2"]}:
+                    continue
+                other = pair["sample_2"] if pair["sample_1"] == sample_id else pair["sample_1"]
+                candidates.append((pair["ibs_similarity"] if pair["ibs_similarity"] is not None else -1, other, pair))
+            for rank, (_, other, pair) in enumerate(sorted(candidates, reverse=True)[:10], 1):
+                nearest.append({"sample_id": sample_id, "rank": rank, "neighbor": other, "ibs_similarity": pair["ibs_similarity"], "pi_hat": pair["pi_hat"], "genotype_discordance": pair["genotype_discordance"], "difference_score": pair["difference_score"], "warning_level": pair["warning_level"]})
+        nearest_out = _write_tsv(run_dir / "sample_nearest_neighbors.tsv", nearest, ["sample_id", "rank", "neighbor", "ibs_similarity", "pi_hat", "genotype_discordance", "difference_score", "warning_level"])
+        het_prefix = Path(panel).parent / "inbreeding"
+        self._run(["--bfile", panel, "--allow-extra-chr", "--extract", str(prune_prefix) + ".prune.in", "--het", "--out", het_prefix], cancel, "样本近交系数F")
+        het_rows = [{"sample_id": x.get("IID"), "observed_homozygotes": _int(x.get("O(HOM)")), "expected_homozygotes": _float(x.get("E(HOM)")), "nonmissing_autosomal": _int(x.get("N(NM)")), "inbreeding_f": _float(x.get("F"))} for x in _read_space_table(str(het_prefix) + ".het")]
+        het_out = _write_tsv(run_dir / "sample_inbreeding.tsv", het_rows, ["sample_id", "observed_homozygotes", "expected_homozygotes", "nonmissing_autosomal", "inbreeding_f"])
+        module["summary"] = {"pairs": len(parsed), "critical_pairs": sum(x["warning_level"] == "critical" for x in parsed), "warning_pairs": sum(x["warning_level"] == "warning" for x in parsed), "pi_hat_ge_0_9": sum((x["pi_hat"] or 0) >= .9 for x in parsed), "samples_with_f": len(het_rows), "estimator": "PLINK1.9 IBD PI_HAT + IBS DST; not KING"}
         module["preview"] = parsed[:20]
-        module["artifacts"] = [out.name]
+        module["artifacts"] = [out.name, suspicious.name, nearest_out.name, het_out.name]
 
     def _ld(self, panel, prune_prefix, prune_ids, options, module, run_dir, cancel):
         maximum = max(2, min(20000, int(options["ld_max_markers"])))

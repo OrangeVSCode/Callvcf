@@ -115,11 +115,29 @@ def _wsl_operational():
         return False
 
 
+def _wsl_bcftools_path():
+    if platform.system() != "Windows":
+        return None
+    executable = shutil.which("wsl.exe") or shutil.which("wsl")
+    if not executable:
+        return None
+    try:
+        proc = subprocess.run(
+            [str(executable), "-e", "sh", "-lc", "command -v bcftools"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", timeout=12,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        values = proc.stdout.strip().splitlines()
+        return values[-1].strip() if proc.returncode == 0 and values else None
+    except Exception:
+        return None
 def tools_status():
     system = platform.system()
     plink = resolve_plink()
     ldblockshow = resolve_ldblockshow()
     wsl_installed = _wsl_operational() if system == "Windows" else False
+    native_bcftools = shutil.which("bcftools")
+    wsl_bcftools = _wsl_bcftools_path()
     return {
         "tool_root": str(tool_root()), "platform": system,
         "plink": {"installed": bool(plink), "path": plink, "version": _probe(plink, ["--version"]),
@@ -128,6 +146,15 @@ def tools_status():
                         "version": "LDBlockShow (official hewm2008 build)" if ldblockshow else None,
                         "license": "MIT", "requires_wsl": system == "Windows",
                         "wsl_available": wsl_installed},
+        "bcftools": {
+            "installed": bool(native_bcftools or wsl_bcftools),
+            "path": native_bcftools or ("WSL · {}".format(wsl_bcftools) if wsl_bcftools else None),
+            "version": _probe(native_bcftools, ["--version"]) if native_bcftools else None,
+            "license": "MIT/Expat（部分插件GPL）",
+            "requires_wsl": system == "Windows" and not native_bcftools,
+            "wsl_available": wsl_installed,
+            "install_mode": "WSL apt managed runtime" if system == "Windows" else "system package",
+        },
     }
 
 
@@ -176,6 +203,28 @@ def install_tool(name):
             installed.chmod(installed.stat().st_mode | stat.S_IEXEC)
             _write_metadata("ldblockshow", {"source": LDBLOCKSHOW_URL, "version": "main",
                                              "sha256": digest, "download_bytes": size, "license": "MIT"})
+        elif name == "bcftools":
+            if platform.system() != "Windows":
+                raise VCFError("当前版本只在Windows中提供bcftools一键管理；Linux请使用系统包管理器安装")
+            wsl = shutil.which("wsl.exe") or shutil.which("wsl")
+            if not wsl or not _wsl_operational():
+                raise VCFError("请先完成Ubuntu/WSL首次初始化（创建Linux用户名并进入一次终端），然后再点一键安装")
+            command = [str(wsl), "-u", "root", "-e", "sh", "-lc",
+                       "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y bcftools tabix"]
+            try:
+                proc = subprocess.run(
+                    command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, timeout=1800,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except subprocess.TimeoutExpired:
+                raise VCFError("bcftools安装超过30分钟；请检查WSL网络后重试")
+            if proc.returncode or not _wsl_bcftools_path():
+                raise VCFError("bcftools安装失败：{}".format((proc.stdout or "无详细输出")[-1500:]))
+            _write_metadata("bcftools", {
+                "source": "Ubuntu apt repositories", "package": "bcftools + tabix",
+                "license": "MIT/Expat（部分插件GPL）", "backend": "WSL",
+            })
         else:
             raise VCFError("无法识别的工具：{}".format(name))
     return tools_status()

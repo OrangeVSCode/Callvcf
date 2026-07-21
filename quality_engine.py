@@ -7,6 +7,7 @@ import html
 import json
 import math
 import os
+import re
 import shutil
 import statistics
 import subprocess
@@ -142,6 +143,42 @@ def genotype_class(alleles):
     return "other"
 
 
+def _metric_summary(values, evaluated, available_n=None):
+    values = [x for x in values if x is not None]
+    available_n = len(values) if available_n is None else available_n
+    return {
+        "available": bool(available_n), "n": available_n,
+        "coverage": available_n / evaluated if evaluated else None,
+        "quantile_sample_n": len(values),
+        "min": min(values) if values else None,
+        "q05": _quantile(values, .05), "median": _median(values),
+        "q95": _quantile(values, .95), "max": max(values) if values else None,
+    }
+
+
+def _detail_variant_type(ref, alt, info, broad_type):
+    svtype = str(info.get("SVTYPE") or "").upper()
+    if svtype:
+        return svtype
+    if broad_type == "SV":
+        if "[" in alt or "]" in alt:
+            return "BND"
+        return "SV"
+    alleles = alt.split(",")
+    if alleles and all(len(ref) == len(value) > 1 for value in alleles):
+        return "MNP"
+    return broad_type
+
+
+def _sv_length(info, pos):
+    raw = str(info.get("SVLEN") or "").split(",", 1)[0]
+    value = _safe_int(raw)
+    if value is not None:
+        return abs(value)
+    end = _safe_int(info.get("END"))
+    return abs(end - pos) + 1 if end is not None else None
+
+
 class QualityEvaluator:
     def __init__(self, service):
         self.service = service
@@ -197,17 +234,24 @@ class QualityEvaluator:
                 "sample_id": sample, "evaluated": 0, "called": 0, "missing": 0,
                 "het": 0, "hom_ref": 0, "hom_alt": 0, "other": 0,
                 "ploidy_counts": Counter(), "dp": Counter(), "gq": Counter(),
-                "ab_n": 0, "ab_out": 0,
+                "ab_n": 0, "ab_out": 0, "phased": 0,
             } for sample in samples
         }
         header = {
             "fileformat": None, "reference": None, "sources": [], "contigs": [],
             "filters": [], "info_ids": [], "format_ids": [], "has_chrom_header": False,
+            "contig_lengths": {},
         }
         type_counts = Counter()
+        broad_type_counts = Counter()
         filter_counts = Counter()
         svtype_counts = Counter()
+        sv_length_bins = Counter()
+        sv_imprecise = 0
+        sv_interval_uncertainty = 0
+        sv_support_tagged = 0
         contig_counts = Counter()
+        density_windows = Counter()
         maf_bins = Counter()
         missing_bins = Counter()
         site_warn_count = 0
@@ -216,6 +260,15 @@ class QualityEvaluator:
         malformed = 0
         transitions = 0
         transversions = 0
+        nonminimal_indels = 0
+        adjacent_duplicates = 0
+        previous_key = None
+        metric_values = {key: [] for key in ("QUAL", "QD", "MQ", "FS", "SOR", "MQRankSum", "ReadPosRankSum")}
+        metric_available_counts = Counter()
+        metric_cap = max(10000, min(target_records, 100000))
+        variant_export_cap = int(config.get("variant_export_cap") or 100000)
+        variant_export_cap = max(1000, min(variant_export_cap, 200000))
+        variant_rows = []
         sampled_records = 0
         gt_ploidy_counts = Counter()
         total_records = 0
@@ -239,7 +292,11 @@ class QualityEvaluator:
                 elif text.startswith("##source="):
                     header["sources"].append(text.split("=", 1)[1])
                 elif text.startswith("##contig=<ID="):
-                    header["contigs"].append(text.split("##contig=<ID=", 1)[1].split(",", 1)[0].split(">", 1)[0])
+                    contig_id = text.split("##contig=<ID=", 1)[1].split(",", 1)[0].split(">", 1)[0]
+                    header["contigs"].append(contig_id)
+                    length_match = re.search(r"(?:^|,)length=([0-9]+)", text, re.IGNORECASE)
+                    if length_match:
+                        header["contig_lengths"][contig_id] = int(length_match.group(1))
                 elif text.startswith("##FILTER=<ID="):
                     header["filters"].append(text.split("##FILTER=<ID=", 1)[1].split(",", 1)[0].split(">", 1)[0])
                 elif text.startswith("##INFO=<ID="):
@@ -273,22 +330,56 @@ class QualityEvaluator:
                     seen_chroms.append(chrom)
                     seen_chrom_set.add(chrom)
             last_chrom, last_pos = chrom, pos
-            ref, alt, filt, info_text = parts[3], parts[4], parts[6], parts[7]
+            ref, alt, qual_text, filt, info_text = parts[3], parts[4], parts[5], parts[6], parts[7]
             info = parse_info(info_text)
-            variant_type = classify_variant(ref, alt, "", info_text)
+            broad_type = classify_variant(ref, alt, "", info_text)
+            variant_type = _detail_variant_type(ref, alt, info, broad_type)
             type_counts[variant_type] += 1
+            broad_type_counts[broad_type] += 1
             contig_counts[chrom] += 1
+            density_windows[(chrom, (pos - 1) // 1000000)] += 1
+            record_key = (chrom, pos, ref, alt)
+            if record_key == previous_key:
+                adjacent_duplicates += 1
+            previous_key = record_key
             if "," in alt:
                 multiallelic += 1
+            if broad_type == "INDEL":
+                alleles = alt.split(",")
+                reducible = False
+                for value in alleles:
+                    if not value or value.startswith("<"):
+                        continue
+                    left, right = ref, value
+                    while len(left) > 1 and len(right) > 1 and left[-1] == right[-1]:
+                        left, right, reducible = left[:-1], right[:-1], True
+                    while len(left) > 1 and len(right) > 1 and left[0] == right[0]:
+                        left, right, reducible = left[1:], right[1:], True
+                if reducible:
+                    nonminimal_indels += 1
             for value in filt.split(";"):
                 filter_counts[value or "."] += 1
-            if variant_type == "SV":
-                svtype_counts[info.get("SVTYPE") or "未标注"] += 1
+            if broad_type == "SV":
+                svtype_counts[info.get("SVTYPE") or variant_type or "未标注"] += 1
+                length = _sv_length(info, pos)
+                length_bucket = "未知" if length is None else "<100 bp" if length < 100 else "100 bp–1 kb" if length < 1000 else "1–10 kb" if length < 10000 else "10–100 kb" if length < 100000 else ">=100 kb"
+                sv_length_bins[length_bucket] += 1
+                sv_imprecise += int("IMPRECISE" in info_text.split(";"))
+                sv_interval_uncertainty += int("CIPOS" in info or "CIEND" in info)
+                sv_support_tagged += int(any(key in info for key in ("SU", "SUPPORT", "RE", "PE", "SR", "DV", "RV")))
 
             sampled = stride == 1 or ((sum(ord(x) for x in chrom) * 131 + pos) % stride == 0)
             if sampled:
                 sampled_records += 1
-                if variant_type == "SNP" and len(ref) == 1 and len(alt) == 1:
+                current_metrics = {"QUAL": _safe_float(qual_text)}
+                for metric in ("QD", "MQ", "FS", "SOR", "MQRankSum", "ReadPosRankSum"):
+                    current_metrics[metric] = _safe_float(str(info.get(metric) or "").split(",", 1)[0])
+                for metric, value in current_metrics.items():
+                    if value is not None:
+                        metric_available_counts[metric] += 1
+                        if len(metric_values[metric]) < metric_cap:
+                            metric_values[metric].append(value)
+                if broad_type == "SNP" and len(ref) == 1 and len(alt) == 1:
                     pair = (ref.upper(), alt.upper())
                     if pair in {("A", "G"), ("G", "A"), ("C", "T"), ("T", "C")}:
                         transitions += 1
@@ -298,6 +389,8 @@ class QualityEvaluator:
                 format_keys = sample_tail[0].split(":") if sample_tail else []
                 index = {key: i for i, key in enumerate(format_keys)}
                 missing = 0
+                missing_rate = None
+                maf = None
                 allele_count = Counter()
                 allele_number = 0
                 for sample_index, sample in enumerate(samples):
@@ -313,6 +406,8 @@ class QualityEvaluator:
                         missing += 1
                         continue
                     acc["called"] += 1
+                    if "|" in gt:
+                        acc["phased"] += 1
                     acc["ploidy_counts"][len(alleles)] += 1
                     gt_ploidy_counts[len(alleles)] += 1
                     for allele in alleles:
@@ -347,6 +442,18 @@ class QualityEvaluator:
                     maf = min(ref_freq, alt_freq)
                     bucket = "0" if maf == 0 else "(0,1%]" if maf <= .01 else "(1%,5%]" if maf <= .05 else "(5%,10%]" if maf <= .10 else "(10%,30%]" if maf <= .30 else "(30%,50%]"
                     maf_bins[bucket] += 1
+                if len(variant_rows) < variant_export_cap:
+                    variant_rows.append({
+                        "chrom": chrom, "pos": pos, "id": parts[2], "ref": ref, "alt": alt,
+                        "type": variant_type, "qual": _safe_float(qual_text), "filter": filt,
+                        "missing_rate": missing_rate, "maf": maf,
+                        "qd": _safe_float(info.get("QD")), "mq": _safe_float(info.get("MQ")),
+                        "fs": _safe_float(info.get("FS")), "sor": _safe_float(info.get("SOR")),
+                        "mq_rank_sum": _safe_float(info.get("MQRankSum")),
+                        "read_pos_rank_sum": _safe_float(info.get("ReadPosRankSum")),
+                        "svtype": info.get("SVTYPE"), "svlen": _sv_length(info, pos) if broad_type == "SV" else None,
+                        "imprecise": "IMPRECISE" in info_text.split(";"),
+                    })
 
             if progress and total_records % 5000 == 0:
                 expected = metadata.get("record_count")
@@ -378,6 +485,7 @@ class QualityEvaluator:
                 "median_dp": _median_counter(acc["dp"]),
                 "median_gq": _median_counter(acc["gq"]),
                 "ab_outlier_rate": acc["ab_out"] / acc["ab_n"] if acc["ab_n"] else None,
+                "phase_rate": acc["phased"] / called if called else None,
                 "ploidy_mismatch_rate": (
                     sum(count for value, count in acc["ploidy_counts"].items() if value != effective_gt_ploidy) / called
                     if called and effective_gt_ploidy else None
@@ -397,6 +505,18 @@ class QualityEvaluator:
             warnings.append(_warning("critical", "file", metadata["name"], "UNSORTED", "检测到坐标顺序异常", evidence="{}条记录发生倒序或染色体回跳".format(unsorted_records), advice="生成新文件进行排序，保留原文件"))
         if malformed:
             warnings.append(_warning("critical", "file", metadata["name"], "MALFORMED", "存在无法解析的记录", evidence="{}条".format(malformed)))
+        if nonminimal_indels:
+            warnings.append(_warning(
+                "warning", "site", metadata["name"], "NONMINIMAL_ALLELES",
+                "检测到可继续最简化表达的INDEL", "{}条记录".format(nonminimal_indels),
+                "用参考FASTA生成bcftools norm新副本；不要覆盖原文件",
+            ))
+        if adjacent_duplicates:
+            warnings.append(_warning(
+                "warning", "site", metadata["name"], "ADJACENT_DUPLICATES",
+                "检测到相邻重复变异记录", "{}条CHROM/POS/REF/ALT重复".format(adjacent_duplicates),
+                "标准化后再次审计，再决定是否去重",
+            ))
 
         het_values = [x["het_rate"] for x in report_samples if x["het_rate"] is not None]
         het_center = _median(het_values)
@@ -413,7 +533,7 @@ class QualityEvaluator:
             elif het_q99 is not None and het_q99 > het_center:
                 relative_upper = het_q99
                 relative_critical = _quantile(het_values, 0.995)
-        variant_classes = set(type_counts)
+        variant_classes = set(broad_type_counts)
         sv_only = bool(variant_classes) and variant_classes == {"SV"}
         het_rule_mode = "cohort_relative_sv" if sv_only else "profile_absolute_plus_relative"
 
@@ -494,8 +614,21 @@ class QualityEvaluator:
         if any(x["code"] in {"HEADER_REQUIRED", "UNSORTED", "MALFORMED"} and x["level"] == "critical" for x in warnings):
             score = min(score, 59)
         status = "critical" if critical_n else "warning" if warning_n else "pass"
+        evidence_items = {
+            "fileformat": bool(header["fileformat"]), "chrom_header": header["has_chrom_header"],
+            "reference": bool(header["reference"]), "source": bool(header["sources"]),
+            "filter_definition": bool(header["filters"]), "format_gt": "GT" in header["format_ids"],
+            "info_definitions": bool(header["info_ids"]), "sorted": not unsorted_records,
+        }
+        qc_evidence_score = round(100 * sum(evidence_items.values()) / len(evidence_items))
+        quality_summaries = {key: _metric_summary(values, sampled_records, metric_available_counts[key]) for key, values in metric_values.items()}
+        density_all = []
+        for (chrom, window), count in density_windows.most_common():
+            density_all.append({"chrom": chrom, "start": window * 1000000 + 1, "end": (window + 1) * 1000000, "variant_count": count})
+        sv_total = sum(svtype_counts.values())
+        phase_values = [x["phase_rate"] for x in report_samples if x.get("phase_rate") is not None]
         result = {
-            "schema_version": "callvcf-qc-1.0",
+            "schema_version": "callvcf-qc-1.1",
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "input": {
                 "path": path, "name": metadata["name"], "file_size": metadata["file_size"],
@@ -514,9 +647,9 @@ class QualityEvaluator:
                 "record_count": total_records, "contig_count": len(contig_counts),
                 "critical_count": critical_n, "warning_count": warning_n,
             },
-            "header_audit": header,
+            "header_audit": {**header, "qc_evidence_items": evidence_items, "qc_evidence_score": qc_evidence_score},
             "site_metrics": {
-                "variant_types": dict(type_counts), "filters": dict(filter_counts),
+                "variant_types": dict(type_counts), "broad_variant_types": dict(broad_type_counts), "filters": dict(filter_counts),
                 "svtypes": dict(svtype_counts), "contigs": dict(contig_counts),
                 "multiallelic_count": multiallelic, "malformed_count": malformed,
                 "unsorted_count": unsorted_records, "site_warning_count": site_warn_count,
@@ -524,6 +657,15 @@ class QualityEvaluator:
                 "missing_rate_bins": dict(missing_bins), "maf_bins": dict(maf_bins),
                 "transitions": transitions, "transversions": transversions,
                 "titv": transitions / transversions if transversions else None,
+                "quality_field_summaries": quality_summaries,
+                "nonminimal_indel_count": nonminimal_indels,
+                "adjacent_duplicate_count": adjacent_duplicates,
+                "density_window_bp": 1000000,
+                "density_hotspots": density_all[:100], "density_windows": density_all,
+                "sv_length_bins": dict(sv_length_bins),
+                "sv_imprecise_rate": sv_imprecise / sv_total if sv_total else None,
+                "sv_interval_uncertainty_rate": sv_interval_uncertainty / sv_total if sv_total else None,
+                "sv_support_tag_coverage": sv_support_tagged / sv_total if sv_total else None,
             },
             "cohort_metrics": {
                 "median_het_rate": het_center, "het_mad": het_mad,
@@ -531,11 +673,22 @@ class QualityEvaluator:
                 "het_relative_upper": relative_upper,
                 "het_relative_critical": relative_critical,
                 "het_rule_mode": het_rule_mode,
+                "median_phase_rate": _median(phase_values),
             },
             "samples": report_samples,
+            "module_availability": [
+                {"module": "VCF/Header/位点/样本指标", "status": "complete", "reason": "VCF内生数据"},
+                {"module": "参考REF与contig长度核验", "status": "conditional", "reason": "需要同版本FASTA及.fai"},
+                {"module": "批次/品种内比较", "status": "conditional", "reason": "需要含sample_id、group/variety、batch的样本表"},
+                {"module": "重复区/低复杂度重叠", "status": "conditional", "reason": "需要BED注释"},
+                {"module": "功能后果与结构域", "status": "conditional", "reason": "需要ANN/CSQ/BCSQ或GFF3/外部注释表"},
+                {"module": "污染定量", "status": "not_applicable", "reason": "VCF只能给代理信号；可靠估计需要BAM/CRAM与专用模型"},
+            ],
+            "_variant_metrics_rows": variant_rows,
+            "variant_export": {"rows": len(variant_rows), "cap": variant_export_cap, "truncated": sampled_records > len(variant_rows)},
             "warnings": warnings,
             "repair_policy": {
-                "safe_actions": ["建立缺失索引", "生成新的排序副本", "生成新的标准化副本"],
+                "safe_actions": ["建立缺失索引", "生成新的排序副本", "生成新的标准化副本", "生成补全统计标签的新副本"],
                 "dangerous_actions": ["覆盖原VCF", "改写REF/ALT或GT", "坐标转换", "染色体批量重命名", "删除原文件"],
                 "dangerous_requires_second_confirmation": True,
                 "original_is_never_silently_overwritten": True,
@@ -633,10 +786,10 @@ def render_report(result):
     warnings = result["warnings"]
     sample_rows = []
     for item in result["samples"]:
-        sample_rows.append("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+        sample_rows.append("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
             html.escape(item["sample_id"]), _ratio(item["missing_rate"]), _ratio(item["het_rate"]),
             _fmt(item["median_dp"]), _fmt(item["median_gq"]), _ratio(item["ab_outlier_rate"]),
-            _ratio(item["ploidy_mismatch_rate"])))
+            _ratio(item.get("phase_rate")), _ratio(item["ploidy_mismatch_rate"])))
     warning_rows = []
     for item in warnings:
         warning_rows.append("<tr><td><span class='badge {}'>{}</span></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
@@ -662,6 +815,14 @@ def render_report(result):
         pca_chart = _svg_pca((modules.get("pca") or {}).get("preview") or [])
         ld_chart = _svg_ld_decay((modules.get("ld") or {}).get("preview") or [])
         population_section = "<section class='card'><h2>群体遗传分析</h2><p class='note'>这些模块使用过滤后的二等位标记面板；HWE是否参与质量解释由Profile决定，其余默认作为探索性证据，不自动给样本定性。</p><div class='table'><table><thead><tr><th>模块</th><th>状态</th><th>摘要</th><th>结果文件</th></tr></thead><tbody>{}</tbody></table></div></section><div class='grid'><section class='card'><h2>PCA：PC1 × PC2</h2>{}</section><section class='card'><h2>LD衰减（平均r²）</h2>{}</section></div>".format("".join(population_rows) or "<tr><td colspan='4'>未启用</td></tr>", pca_chart, ld_chart)
+    metric_rows = []
+    for key, item in (site.get("quality_field_summaries") or {}).items():
+        metric_rows.append("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+            html.escape(key), _ratio(item.get("coverage")), _fmt(item.get("q05")),
+            _fmt(item.get("median")), _fmt(item.get("q95")), _fmt(item.get("max"))))
+    availability_rows = ["<tr><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+        html.escape(x["module"]), html.escape(x["status"]), html.escape(x["reason"]))
+        for x in result.get("module_availability", [])]
     embedded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
     template = """<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>CallVCF质量评估报告</title><style>
     :root{--ink:#18342b;--muted:#667a72;--line:#d8e2dd;--brand:#2f725f;--soft:#f2f7f4;--warn:#a96200;--crit:#a62d33}*{box-sizing:border-box}body{margin:0;background:#edf3ef;color:var(--ink);font-family:"Microsoft YaHei",Arial,sans-serif}main{max-width:1180px;margin:auto;padding:30px}.hero,.card{background:white;border:1px solid var(--line);border-radius:18px;padding:24px;margin-bottom:18px}.hero{background:linear-gradient(135deg,#173c31,#347966);color:white}.hero h1{font-size:34px;margin:5px 0}.hero p{opacity:.82}.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}.kpi{background:var(--soft);border-radius:14px;padding:16px}.kpi b{display:block;font-size:25px;margin-top:6px}.score{font-size:64px;font-weight:800}.status-pass{color:#d6ffe8}.status-warning{color:#ffe09c}.status-critical{color:#ffb1b4}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}h2{font-size:21px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;padding:9px;border-bottom:1px solid #e8eeeb}th{position:sticky;top:0;background:#f6faf8}.table{max-height:520px;overflow:auto;border:1px solid var(--line);border-radius:10px}.badge{padding:3px 7px;border-radius:10px;font-weight:700}.badge.info{background:#e8eef3}.badge.warning{background:#fff0cc;color:#805000}.badge.critical{background:#ffe0e1;color:#98242b}.note{padding:12px;background:#fff7df;border-left:4px solid #d18b00}.actions{display:flex;gap:8px;flex-wrap:wrap}.actions button{border:0;border-radius:9px;padding:10px 14px;background:#e8f1ed;color:var(--ink);cursor:pointer}.actions button:first-child{background:white}.empty{padding:30px;color:var(--muted)}svg{width:100%;height:auto}@media(max-width:800px){.kpis,.grid{grid-template-columns:1fr 1fr}}@media print{body{background:white}main{max-width:none;padding:0}.actions{display:none}.card,.hero{break-inside:avoid;border-color:#bbb}.table{max-height:none;overflow:visible}}
@@ -669,8 +830,11 @@ def render_report(result):
     <section class='kpis'><div class='kpi'>记录数<b>{records}</b></div><div class='kpi'>样本数<b>{samples}</b></div><div class='kpi'>染色体/Contig<b>{contigs}</b></div><div class='kpi'>严重告警<b>{critical}</b></div><div class='kpi'>一般告警<b>{warning}</b></div></section>
     <section class='card'><h2>运行口径</h2><p><b>Profile：</b>{profile_name}；<b>物种：</b>{species}；<b>生物学倍性：</b>{ploidy}；<b>VCF GT编码倍性：</b>{gt_ploidy}；<b>亚基因组：</b>{subgenomes}</p><p><b>扫描：</b>{scan_mode}，评估 {evaluated}/{records} 条记录，耗时 {elapsed} 秒。</p><p class='note'>{method_note}</p></section>
     <div class='grid'><section class='card'><h2>变异类型</h2>{type_chart}</section><section class='card'><h2>位点缺失率分布</h2>{missing_chart}</section></div>
+    <div class='grid'><section class='card'><h2>MAF分布</h2>{maf_chart}</section><section class='card'><h2>SV长度分布</h2>{sv_chart}</section></div>
+    <section class='card'><h2>位点质量字段分布</h2><p>覆盖率表示抽样位点中该字段存在的比例；缺字段显示为NA，不按0分处理。</p><div class='table'><table><thead><tr><th>字段</th><th>覆盖率</th><th>P05</th><th>中位数</th><th>P95</th><th>最大值</th></tr></thead><tbody>{metric_rows}</tbody></table></div><p>Header质控证据分：<b>{evidence_score}/100</b>；可继续最简化INDEL：{nonminimal}；相邻重复记录：{duplicates}。</p></section>
+    <section class='card'><h2>模块可用性</h2><p class='note'>需要外部输入的模块不会伪造结果，也不会因为用户未提供文件而扣质量分。</p><div class='table'><table><thead><tr><th>模块</th><th>状态</th><th>原因/所需输入</th></tr></thead><tbody>{availability_rows}</tbody></table></div></section>
     <section class='card'><h2>告警与建议</h2><div class='table'><table><thead><tr><th>级别</th><th>范围</th><th>对象</th><th>问题</th><th>建议</th></tr></thead><tbody>{warning_rows}</tbody></table></div></section>
-    <section class='card'><h2>样本质量指标</h2><div class='table'><table><thead><tr><th>样本</th><th>缺失率</th><th>杂合率</th><th>中位DP</th><th>中位GQ</th><th>AB异常</th><th>倍性不符</th></tr></thead><tbody>{sample_rows}</tbody></table></div></section>
+    <section class='card'><h2>样本质量指标</h2><div class='table'><table><thead><tr><th>样本</th><th>缺失率</th><th>杂合率</th><th>中位DP</th><th>中位GQ</th><th>AB异常</th><th>相位率</th><th>倍性不符</th></tr></thead><tbody>{sample_rows}</tbody></table></div></section>
     <section class='card'><h2>有效阈值与来源</h2><div class='table'><table><thead><tr><th>阈值</th><th>有效值</th><th>来源</th></tr></thead><tbody>{threshold_rows}</tbody></table></div></section>
     {population_section}
     <section class='card'><h2>自动修复安全策略</h2><p>原始VCF永不被静默覆盖。覆盖源文件、改写REF/ALT/GT、坐标转换、染色体批量重命名和删除文件均被定义为危险操作，执行前必须再次确认。</p></section>
@@ -686,6 +850,12 @@ def render_report(result):
         "elapsed": scan["elapsed_seconds"], "method_note": html.escape(scan["method_note"]),
         "type_chart": _svg_bars(sorted(site["variant_types"].items()), "SNP / INDEL / SV"),
         "missing_chart": _svg_bars([(x, site["missing_rate_bins"].get(x, 0)) for x in ["0–1%", "1–5%", "5–10%", "10–20%", ">20%"]], "位点缺失率"),
+        "maf_chart": _svg_bars([(x, site["maf_bins"].get(x, 0)) for x in ["0", "(0,1%]", "(1%,5%]", "(5%,10%]", "(10%,30%]", "(30%,50%]"]], "次要等位基因频率"),
+        "sv_chart": _svg_bars(list((site.get("sv_length_bins") or {}).items()), "SV长度"),
+        "metric_rows": "".join(metric_rows) or "<tr><td colspan='6'>VCF未提供这些字段</td></tr>",
+        "availability_rows": "".join(availability_rows),
+        "evidence_score": result.get("header_audit", {}).get("qc_evidence_score", "—"),
+        "nonminimal": site.get("nonminimal_indel_count", 0), "duplicates": site.get("adjacent_duplicate_count", 0),
         "warning_rows": "".join(warning_rows) or "<tr><td colspan='5'>未触发告警</td></tr>", "sample_rows": "".join(sample_rows),
         "threshold_rows": "".join(threshold_rows), "population_section": population_section, "embedded": embedded,
     }
@@ -768,11 +938,18 @@ class QualityJobManager:
                     path, result["profile"], run_dir, population_options,
                     None, job["cancel"],
                 )
+            variant_rows = result.pop("_variant_metrics_rows", [])
             report_path = run_dir / "report.html"
             json_path = run_dir / "report_summary.json"
             samples_path = run_dir / "sample_metrics.tsv"
             warnings_path = run_dir / "warnings.tsv"
             manifest_path = run_dir / "run_manifest.json"
+            variants_path = run_dir / "variant_metrics.tsv"
+            site_summary_path = run_dir / "site_metric_summary.tsv"
+            density_path = run_dir / "density_windows.tsv"
+            modules_path = run_dir / "module_availability.tsv"
+            filters_path = run_dir / "recommend_filters.tsv"
+            sv_path = run_dir / "sv_metrics.tsv"
             report_path.write_text(render_report(result), encoding="utf-8")
             json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
             with samples_path.open("w", encoding="utf-8-sig", newline="") as handle:
@@ -783,6 +960,30 @@ class QualityJobManager:
             with warnings_path.open("w", encoding="utf-8-sig", newline="") as handle:
                 writer = csv.DictWriter(handle, fieldnames=warning_fields, delimiter="\t")
                 writer.writeheader(); writer.writerows(result["warnings"])
+            variant_fields = ["chrom", "pos", "id", "ref", "alt", "type", "qual", "filter", "missing_rate", "maf", "qd", "mq", "fs", "sor", "mq_rank_sum", "read_pos_rank_sum", "svtype", "svlen", "imprecise"]
+            with variants_path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=variant_fields, delimiter="\t", extrasaction="ignore")
+                writer.writeheader(); writer.writerows(variant_rows)
+            with sv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=variant_fields, delimiter="\t", extrasaction="ignore")
+                writer.writeheader(); writer.writerows(x for x in variant_rows if x.get("svtype") or x.get("type") in {"SV", "DEL", "DUP", "INV", "INS", "CNV", "BND"})
+            summary_rows = []
+            for metric, values in result["site_metrics"].get("quality_field_summaries", {}).items():
+                summary_rows.append({"metric": metric, **values})
+            with site_summary_path.open("w", encoding="utf-8-sig", newline="") as handle:
+                fields = ["metric", "available", "n", "coverage", "quantile_sample_n", "min", "q05", "median", "q95", "max"]
+                writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t", extrasaction="ignore")
+                writer.writeheader(); writer.writerows(summary_rows)
+            _write_rows = lambda path, rows, fields: self._write_tsv(path, rows, fields)
+            _write_rows(density_path, result["site_metrics"].get("density_windows", []), ["chrom", "start", "end", "variant_count"])
+            _write_rows(modules_path, result.get("module_availability", []), ["module", "status", "reason"])
+            thresholds = result["profile"]["thresholds"]
+            recommended = [
+                {"scope": "site", "rule": "F_MISSING", "threshold": "<{}".format(thresholds["site_missing_warn"]), "reason": "Profile位点缺失提醒线", "execution": "建议生成新副本并比较前后指标"},
+                {"scope": "sample", "rule": "missing_rate", "threshold": "<{}".format(thresholds["sample_missing_warn"]), "reason": "Profile样本缺失提醒线", "execution": "先复核批次和深度，不自动删除"},
+                {"scope": "population", "rule": "biallelic_only", "threshold": "strict", "reason": "HWE/IBS/PCA/LD统一使用规范化双等位面板", "execution": "仅用于分析面板"},
+            ]
+            _write_rows(filters_path, recommended, ["scope", "rule", "threshold", "reason", "execution"])
             stat = Path(path).stat()
             manifest = {
                 "run_id": job["id"], "input_path": path, "input_size": stat.st_size,
@@ -797,11 +998,12 @@ class QualityJobManager:
                 item = run_dir / name
                 if item.is_file() and item.parent == run_dir:
                     population_files.append(item)
+            core_files = [report_path, json_path, samples_path, warnings_path, variants_path, site_summary_path, density_path, modules_path, filters_path, sv_path, manifest_path]
             with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                for item in [report_path, json_path, samples_path, warnings_path, manifest_path] + population_files:
+                for item in core_files + population_files:
                     archive.write(item, item.name)
             artifacts = []
-            for item in [report_path, json_path, samples_path, warnings_path, manifest_path] + population_files + [zip_path]:
+            for item in core_files + population_files + [zip_path]:
                 artifacts.append({"name": item.name, "size": item.stat().st_size, "url": "/api/quality/artifact?run_id={}&name={}".format(job["id"], item.name)})
             job["result"] = result
             job["artifacts"] = artifacts
@@ -845,3 +1047,9 @@ class QualityJobManager:
     @staticmethod
     def _public(job):
         return {key: value for key, value in job.items() if key not in {"thread", "cancel", "run_dir"}}
+
+    @staticmethod
+    def _write_tsv(path, rows, fields):
+        with Path(path).open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t", extrasaction="ignore")
+            writer.writeheader(); writer.writerows(rows)
