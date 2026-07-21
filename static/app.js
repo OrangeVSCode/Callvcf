@@ -89,13 +89,16 @@ function renderMetadata(meta) {
   const queryLabel = meta.index_usable
     ? "已索引 · 随机访问"
     : (meta.indexed ? "检测到索引 · 当前流式读取" : (meta.compressed ? "压缩直读 · 流式筛选" : "未索引 · 流式筛选"));
+  const recordCount = meta.record_count == null
+    ? `<strong>—</strong><button class="meta-action" id="countRecordsBtn" title="顺序读取压缩数据流，不生成解压文件">统计总数</button>`
+    : `<strong>${formatNumber(meta.record_count)}</strong><small>${meta.record_count_source === "index" ? "来自索引" : "完整流式统计"}</small>`;
   $("metadata").className = "metadata";
   $("metadata").innerHTML = `
     <div class="meta-grid">
       <div class="meta-card"><span>存储格式</span><strong title="${escapeHtml(meta.storage)}">${escapeHtml(meta.storage)}</strong></div>
       <div class="meta-card"><span>VCF 版本</span><strong>${escapeHtml(meta.vcf_version)}</strong></div>
       <div class="meta-card"><span>样本数</span><strong>${formatNumber(meta.sample_count)}</strong></div>
-      <div class="meta-card"><span>记录数</span><strong>${formatNumber(meta.record_count)}</strong></div>
+      <div class="meta-card record-count-card"><span>记录数</span>${recordCount}</div>
       <div class="meta-card"><span>染色体/Contig</span><strong>${formatNumber(meta.contig_count)}</strong></div>
       <div class="meta-card"><span>查询模式</span><strong title="${escapeHtml(meta.query_mode)}">${queryLabel}</strong></div>
       <div class="meta-card"><span>磁盘占用</span><strong title="${escapeHtml(meta.space_mode || "")}">原文件直读 · 不生成解压副本</strong></div>
@@ -104,6 +107,28 @@ function renderMetadata(meta) {
     <div class="type-chips">${types || '<span class="chip">未观察到记录</span>'}</div>`;
   $("samplePicker").classList.toggle("hidden", !meta.samples.length);
   renderSampleSuggestions("");
+  const countButton = $("countRecordsBtn");
+  if (countButton) countButton.addEventListener("click", countRecords);
+}
+
+async function countRecords() {
+  const button = $("countRecordsBtn");
+  if (!button || !state.metadata) return;
+  button.disabled = true;
+  button.textContent = "统计中…";
+  toast("正在完整读取压缩数据流统计记录数；不会生成解压文件");
+  try {
+    const result = await api("/api/count-records", { path: currentPath() });
+    state.metadata.record_count = result.record_count;
+    state.metadata.record_count_source = result.method === "index" ? "index" : "full_stream";
+    renderMetadata(state.metadata);
+    const elapsed = result.cached ? "已使用缓存" : `耗时 ${result.elapsed_seconds} 秒`;
+    toast(`记录总数：${formatNumber(result.record_count)}（${elapsed}）`);
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "重新统计";
+    toast(error.message, true);
+  }
 }
 
 async function inspectVCF() {

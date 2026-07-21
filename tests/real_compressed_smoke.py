@@ -60,6 +60,7 @@ def smoke_one(source, expected_type):
         raise AssertionError("真实输入应为 BGZF：{}".format(source_meta["storage"]))
     if source_meta["sample_count"] < 20:
         raise AssertionError("样本数不足，无法测试 LD")
+    source_count = service.count_records(source)
 
     with tempfile.TemporaryDirectory(prefix="callvcf-real-vcfgz-") as temp_name:
         excerpt = Path(temp_name) / (Path(source).name + ".excerpt.vcf.gz")
@@ -100,6 +101,8 @@ def smoke_one(source, expected_type):
             "file": source_meta["name"],
             "source_size": source_meta["file_size"],
             "source_storage": source_meta["storage"],
+            "source_record_count": source_count["record_count"],
+            "source_count_seconds": source_count["elapsed_seconds"],
             "samples": source_meta["sample_count"],
             "contigs": source_meta["contig_count"],
             "expected_type": expected_type,

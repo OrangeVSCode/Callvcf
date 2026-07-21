@@ -152,6 +152,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = SERVICE.discover(payload.get("root"), max_depth=int(payload.get("max_depth", 5)))
             elif route == "/api/inspect":
                 result = SERVICE.inspect(payload.get("path"), force=bool(payload.get("force")))
+            elif route == "/api/count-records":
+                result = SERVICE.count_records(payload.get("path"))
             elif route == "/api/check":
                 result = SERVICE.check_loci(payload.get("path"), payload.get("loci"))
             elif route == "/api/distribution":

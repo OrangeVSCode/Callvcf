@@ -152,6 +152,11 @@ class CoreTests(unittest.TestCase):
             stats = service.sample_stats(str(compressed), ["S2"])
             self.assertEqual(stats["processed_records"], 3)
             self.assertEqual(stats["results"][0]["counts"]["HET"], 2)
+            counted = service.count_records(str(compressed))
+            self.assertEqual(counted["record_count"], 3)
+            self.assertFalse(counted["cached"])
+            self.assertEqual(service.inspect(str(compressed))["record_count"], 3)
+            self.assertTrue(service.count_records(str(compressed))["cached"])
 
             analyzer = AdvancedAnalyzer(service)
             result = analyzer.analyze({
