@@ -2,6 +2,11 @@ const state = { metadata: null, activeTab: "existence", lastResult: null, lastLe
 const $ = (id) => document.getElementById(id);
 const categoryOrder = ["HOM_REF", "HET", "HOM_ALT", "MISSING", "OTHER"];
 const shortLabels = { HOM_REF: "0/0", HET: "0/1", HOM_ALT: "1/1", MISSING: "缺失", OTHER: "其他" };
+const animalRequiredThresholds = [
+  "sample_missing_warn", "sample_missing_critical", "site_missing_warn", "site_missing_critical",
+  "median_dp_min_warn", "median_dp_max_warn", "median_gq_warn", "median_gq_critical",
+  "ab_lower", "ab_upper", "maf_structure", "hwe_p_warn",
+];
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
@@ -723,11 +728,57 @@ function applyQualityProfile() {
   $("qualityGenotypePloidy").value = String(profile.genotype_ploidy || "auto");
   $("qualitySubgenomes").value = profile.subgenomes || 1;
   $("qualityMating").value = profile.mating_system || "unknown";
+  $("qualityKingdom").disabled = profile.id !== "custom";
+  $("animalParametersConfirmed").checked = false;
   localStorage.setItem("callvcfQualityProfile", profile.id);
   state.qualityRun = null;
   state.qcRecommendation = null;
   state.repairCompleted = false;
+  updateSpeciesFocus();
   updateWorkflow();
+}
+
+function animalCustomConfiguration() {
+  const isCustom = $("qualityProfile").value === "custom";
+  const isAnimal = isCustom && $("qualityKingdom").value === "animal";
+  const thresholds = {};
+  document.querySelectorAll("[data-qc-threshold]").forEach(input => { thresholds[input.dataset.qcThreshold] = input.value.trim(); });
+  const missingThresholds = animalRequiredThresholds.filter(key => !thresholds[key]);
+  const missingContext = [];
+  if (!$("qualitySpecies").value.trim()) missingContext.push("物种名称");
+  if ($("qualityGenotypePloidy").value === "auto") missingContext.push("GT编码倍性");
+  if ($("qualityMating").value === "unknown") missingContext.push("繁殖/材料类型");
+  return {isCustom, isAnimal, thresholds, missingThresholds, missingContext, confirmed: $("animalParametersConfirmed").checked};
+}
+
+function updateSpeciesFocus() {
+  const profileIsCustom = $("qualityProfile").value === "custom";
+  $("qualityKingdom").disabled = !profileIsCustom;
+  if (!profileIsCustom) $("qualityKingdom").value = "plant";
+  const config = animalCustomConfiguration();
+  $("animalCustomGuard").classList.toggle("hidden", !config.isAnimal);
+  if (!config.isAnimal) return;
+  $("qualityThresholdDetails").open = true;
+  const complete = !config.missingThresholds.length && !config.missingContext.length;
+  $("animalCustomGuard").classList.toggle("ready", complete && config.confirmed);
+  if (config.missingContext.length) {
+    $("animalCustomStatus").textContent = `还需明确：${config.missingContext.join("、")}。`;
+  } else if (config.missingThresholds.length) {
+    $("animalCustomStatus").textContent = `核心阈值已填写 ${animalRequiredThresholds.length - config.missingThresholds.length}/${animalRequiredThresholds.length}；还缺 ${config.missingThresholds.length} 项。`;
+  } else if (!config.confirmed) {
+    $("animalCustomStatus").textContent = "核心上下文和12项阈值已填写；请核对后勾选责任确认。";
+  } else {
+    $("animalCustomStatus").textContent = "动物自定义参数已完整填写并确认，可以开始评估。";
+  }
+}
+
+function validateSpeciesFocus() {
+  const config = animalCustomConfiguration();
+  if (!config.isAnimal) return config;
+  if (config.missingContext.length) throw new Error(`动物分析必须由使用者明确填写：${config.missingContext.join("、")}`);
+  if (config.missingThresholds.length) throw new Error(`动物分析必须自行填写全部12项核心阈值；当前还缺 ${config.missingThresholds.length} 项`);
+  if (!config.confirmed) throw new Error("请确认动物参数由你依据物种、群体设计和测序方案自行设定");
+  return config;
 }
 
 function activateTab(name, scroll = true) {
@@ -803,6 +854,7 @@ function qualityPayload() {
   document.querySelectorAll("[data-qc-threshold]").forEach(input => {
     if (input.value.trim() !== "") thresholds[input.dataset.qcThreshold] = input.value;
   });
+  const focusConfig = validateSpeciesFocus();
   return {
     path: currentPath(),
     output_dir: $("qualityOutputDir").value.trim(),
@@ -830,6 +882,7 @@ function qualityPayload() {
       subgenomes: Number($("qualitySubgenomes").value),
       mating_system: $("qualityMating").value,
       thresholds,
+      animal_parameters_confirmed: focusConfig.isAnimal && focusConfig.confirmed,
     },
   };
 }
@@ -920,6 +973,9 @@ function renderQualityResult(job) {
   }));
   const readiness = data.analysis_readiness || {};
   const warningSamples = qualityWarningSamples(data);
+  const scopeText = data.profile.analysis_scope === "non_plant_custom"
+    ? "非植物自定义模式：核心参数由使用者提供，软件不套用动物默认阈值"
+    : "植物分析模式：内置植物Profile，可追踪所有用户覆盖参数";
   const priorityRows = (readiness.top_priorities || []).map((item, index) => ({
     顺序: index + 1,
     级别: `<span class="level-${escapeHtml(item.level)}">${escapeHtml(String(item.level || "info").toUpperCase())}</span>`,
@@ -944,7 +1000,7 @@ function renderQualityResult(job) {
     <div class="meta-card"><span>Critical</span><strong>${formatNumber(summary.critical_count)}</strong></div>
     <div class="meta-card"><span>Warning</span><strong>${formatNumber(summary.warning_count)}</strong></div>
   </div>
-  <div class="notice"><b>${escapeHtml(data.profile.name)}</b> · 生物学倍性 ${data.profile.ploidy} · GT编码倍性 ${data.profile.effective_gt_ploidy ?? "未识别"} · ${scan.mode === "full" ? "完整扫描" : `智能抽样 ${formatPercent(scan.sampling_fraction)}`} · ${escapeHtml(scan.method_note)}</div>
+  <div class="notice"><b>${escapeHtml(data.profile.name)}</b> · ${escapeHtml(scopeText)} · 生物学倍性 ${data.profile.ploidy} · GT编码倍性 ${data.profile.effective_gt_ploidy ?? "未识别"} · ${scan.mode === "full" ? "完整扫描" : `智能抽样 ${formatPercent(scan.sampling_fraction)}`} · ${escapeHtml(scan.method_note)}</div>
   <div class="handoff-bar"><strong>下一步：</strong><button class="primary quality-handoff" data-target="quality-qc">核对智能质控参数</button>${warningSamples.length ? `<button class="secondary quality-handoff" data-target="quality-samples">带入 ${warningSamples.length} 个异常样本</button>` : ""}<button class="secondary quality-handoff" data-target="existence">检查关注位点</button><button class="secondary quality-handoff" data-target="lead">进入 Lead 高级分析</button></div>
   <div class="quality-section"><h4>主分析前的优先事项</h4><p class="sub">按阻断性和证据强度排序；没有运行的群体模块显示为 NA，不会被错误计为 0 分。</p>${genericTable(priorityRows, ["顺序","级别","对象","问题","证据","建议"])}${genericTable(dimensionRows, ["维度","分数"])}</div>
   <div class="quality-section"><h4>HWE、PCA、亲缘关系、LD与ROH</h4><p class="sub">HWE按物种Profile解释；棉花/自交/多倍体只做描述。PCA/亲缘使用LD剪枝面板，LD衰减使用未剪枝QC面板；亲缘估计为PLINK 1.9 IBD/PI_HAT。</p>${genericTable(populationRows, ["模块","状态","解释口径","摘要","文件"])}</div>
@@ -1075,7 +1131,7 @@ async function createRepairPlan() {
   try {
     const action = $("repairAction").value;
     if (action === "quality_control_copy" && $("qcMode").value === "profile_adaptive" && !state.qcRecommendation) throw new Error("请先运行质量评估以生成自适应参数，或切换为使用者自定义");
-    const qPayload = qualityPayload();
+    const qPayload = action === "quality_control_copy" ? qualityPayload() : {profile:{}, reference_path:"", sample_meta_path:"", region_bed_path:""};
     const sampleLimit = nullableNumber("qcMaxSampleMissing");
     const excludeSamples = action === "quality_control_copy" && $("qcRemoveSamples").checked
       ? (state.qualityRun?.result?.samples || []).filter(x => x.missing_rate != null && sampleLimit != null && x.missing_rate >= sampleLimit).map(x => x.sample_id)
@@ -1132,6 +1188,10 @@ function initEvents() {
   $("qualityRunBtn").addEventListener("click", runQualityAssessment);
   $("qualityCancelBtn").addEventListener("click", cancelQualityAssessment);
   $("qualityProfile").addEventListener("change", applyQualityProfile);
+  $("qualityKingdom").addEventListener("change", () => { $("animalParametersConfirmed").checked = false; updateSpeciesFocus(); });
+  ["qualitySpecies", "qualityGenotypePloidy", "qualityMating"].forEach(id => $(id).addEventListener("input", updateSpeciesFocus));
+  document.querySelectorAll("[data-qc-threshold]").forEach(input => input.addEventListener("input", updateSpeciesFocus));
+  $("animalParametersConfirmed").addEventListener("change", updateSpeciesFocus);
   $("showRepairPolicyBtn").addEventListener("click", () => showDangerRepairPolicy());
   $("repairAction").addEventListener("change", updateRepairFields);
   $("qcMode").addEventListener("change", updateQcMode);

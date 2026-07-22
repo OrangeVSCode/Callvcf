@@ -1433,7 +1433,7 @@ def render_report(result):
     <nav class='report-nav' aria-label='报告章节'><a href='#section-overview'>总览</a><a href='#section-input'>输入审计</a><a href='#section-site'>位点质量</a><a href='#section-samples'>样本质量</a><a href='#section-population'>群体与亲缘</a><a href='#section-warnings'>告警</a><a href='#section-recommendations'>质控建议</a><a href='#section-downloads'>下载</a></nav>
     <section class='kpis'><div class='kpi'>记录数<b>{records}</b></div><div class='kpi'>样本数<b>{samples}</b></div><div class='kpi'>染色体/Contig<b>{contigs}</b></div><div class='kpi'>严重告警<b>{critical}</b></div><div class='kpi'>一般告警<b>{warning}</b></div></section>
     <section class='card readiness {readiness_code}'><h2>{readiness_title}</h2><p>{readiness_description}</p><div class='priority-list'>{priority_rows}</div><h3>分层评分</h3><div class='dimensions'>{dimension_rows}</div></section>
-    <section class='card' id='section-input'><h2>运行口径与输入审计</h2><p><b>Profile：</b>{profile_name}；<b>物种：</b>{species}；<b>生物学倍性：</b>{ploidy}；<b>VCF GT编码倍性：</b>{gt_ploidy}；<b>亚基因组：</b>{subgenomes}</p><p><b>扫描：</b>{scan_mode}，评估 {evaluated}/{records} 条记录，耗时 {elapsed} 秒。</p><p class='note'>{method_note}</p></section>
+    <section class='card' id='section-input'><h2>运行口径与输入审计</h2><p><b>Profile：</b>{profile_name}；<b>物种：</b>{species}；<b>生物学倍性：</b>{ploidy}；<b>VCF GT编码倍性：</b>{gt_ploidy}；<b>亚基因组：</b>{subgenomes}</p><p class='note'>{focus_note}</p><p><b>扫描：</b>{scan_mode}，评估 {evaluated}/{records} 条记录，耗时 {elapsed} 秒。</p><p class='note'>{method_note}</p></section>
     <div class='grid' id='section-site'><section class='card'><h2>变异类型</h2>{type_chart}</section><section class='card'><h2>位点缺失率分布</h2>{missing_chart}</section></div>
     <div class='grid'><section class='card'><h2>MAF分布</h2>{maf_chart}</section><section class='card'><h2>SV长度分布</h2>{sv_chart}</section></div>
     <section class='card'><h2>位点质量字段分布</h2><p>覆盖率表示抽样位点中该字段存在的比例；缺字段显示为NA，不按0分处理。</p><div class='table'><table><thead><tr><th>字段</th><th>覆盖率</th><th>P05</th><th>中位数</th><th>P95</th><th>最大值</th></tr></thead><tbody>{metric_rows}</tbody></table></div><p>Header质控证据分：<b>{evidence_score}/100</b>；可继续最简化INDEL：{nonminimal}；相邻重复记录：{duplicates}。</p></section>
@@ -1456,6 +1456,11 @@ def render_report(result):
         "critical": summary["critical_count"], "warning": summary["warning_count"], "profile_name": html.escape(profile["name"]),
         "species": html.escape(profile.get("species_name") or profile["kingdom"]), "ploidy": profile["ploidy"],
         "gt_ploidy": profile.get("effective_gt_ploidy") or "未识别", "subgenomes": profile["subgenomes"],
+        "focus_note": html.escape(
+            "非植物自定义模式：全部核心阈值由使用者提供并负责解释；CallVCF不提供动物默认参数。"
+            if profile.get("analysis_scope") == "non_plant_custom"
+            else "植物分析模式：使用内置植物Profile，并记录全部用户覆盖参数及来源。"
+        ),
         "scan_mode": "完整扫描" if scan["mode"] == "full" else "智能抽样", "evaluated": "{:,}".format(scan["evaluated_records"]),
         "elapsed": scan["elapsed_seconds"], "method_note": html.escape(scan["method_note"]),
         "type_chart": _svg_bars(sorted(site["variant_types"].items()), "SNP / INDEL / SV"),
@@ -1505,7 +1510,12 @@ class QualityJobManager:
         return Path(base) / "CallVCF" / "reports"
 
     def catalog(self):
-        return {"profiles": profile_catalog(), "default_report_root": str(self.default_report_root())}
+        return {
+            "profiles": profile_catalog(),
+            "default_report_root": str(self.default_report_root()),
+            "analysis_focus": "plant",
+            "non_plant_mode": "custom_parameters_only",
+        }
 
     def start(self, payload):
         path = self.service._validate_file(payload.get("path"))

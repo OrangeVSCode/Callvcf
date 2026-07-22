@@ -1,8 +1,8 @@
-"""Species/ploidy-aware defaults for the CallVCF quality report.
+"""Plant-focused species/ploidy defaults for the CallVCF quality report.
 
 Profiles are deliberately conservative.  They are starting points, not claims
-that a single threshold is biologically correct for every cohort.  Every value
-can be overridden by the user and the effective source is returned in reports.
+that a single threshold is biologically correct for every plant cohort. Animal
+analysis is available only through the explicit custom-parameter route.
 """
 
 from copy import deepcopy
@@ -28,18 +28,16 @@ BASE_THRESHOLDS = {
 }
 
 
+ANIMAL_REQUIRED_THRESHOLDS = (
+    "sample_missing_warn", "sample_missing_critical",
+    "site_missing_warn", "site_missing_critical",
+    "median_dp_min_warn", "median_dp_max_warn",
+    "median_gq_warn", "median_gq_critical",
+    "ab_lower", "ab_upper", "maf_structure", "hwe_p_warn",
+)
+
+
 PROFILE_CATALOG = [
-    {
-        "id": "generic_diploid_animal",
-        "name": "通用二倍体动物（异交）",
-        "kingdom": "animal",
-        "ploidy": 2,
-        "genotype_ploidy": "auto",
-        "subgenomes": 1,
-        "mating_system": "outcrossing",
-        "notes": "杂合率采用队列内稳健离群值，不设跨物种绝对上限。",
-        "overrides": {},
-    },
     {
         "id": "generic_diploid_plant",
         "name": "通用二倍体植物（自然/异交群体）",
@@ -102,25 +100,25 @@ PROFILE_CATALOG = [
         "overrides": {"hwe_p_warn": None, "ab_lower": 0.10, "ab_upper": 0.90},
     },
     {
-        "id": "haploid_microbe",
-        "name": "通用单倍体微生物/细胞器",
-        "kingdom": "microbe",
+        "id": "plant_haploid_organelle",
+        "name": "植物单倍体/细胞器材料",
+        "kingdom": "plant",
         "ploidy": 1,
         "genotype_ploidy": 1,
         "subgenomes": 1,
         "mating_system": "clonal",
-        "notes": "任何多等位GT都作为混合、污染或倍性设定问题的候选信号。",
+        "notes": "适用于植物单倍体、叶绿体或线粒体VCF；任何多等位GT都作为混合或倍性设定问题候选信号。",
         "overrides": {"het_rate_warn": 0.005, "het_rate_critical": 0.02, "hwe_p_warn": None},
     },
     {
         "id": "custom",
-        "name": "自定义物种与阈值",
+        "name": "自定义物种与阈值（非植物从这里进入）",
         "kingdom": "other",
         "ploidy": 2,
         "genotype_ploidy": "auto",
         "subgenomes": 1,
         "mating_system": "unknown",
-        "notes": "以通用阈值为起点，所有字段均可覆盖。",
+        "notes": "植物可自由定制；动物必须填写核心阈值、GT倍性和繁殖方式并确认，不提供动物默认参数。",
         "overrides": {},
     },
 ]
@@ -146,9 +144,12 @@ def resolve_profile(config=None):
     if profile is None:
         raise VCFError("未知质量评估 Profile：{}".format(profile_id))
 
-    for key in ("kingdom", "mating_system"):
-        if config.get(key):
-            profile[key] = str(config[key])
+    requested_kingdom = str(config.get("kingdom") or profile.get("kingdom") or "other")
+    if profile_id != "custom" and requested_kingdom != "plant":
+        raise VCFError("CallVCF内置Profile仅用于植物；动物或其他非植物数据必须选择“自定义物种与阈值”")
+    profile["kingdom"] = requested_kingdom if profile_id == "custom" else "plant"
+    if config.get("mating_system"):
+        profile["mating_system"] = str(config["mating_system"])
     if config.get("species_name"):
         profile["species_name"] = str(config["species_name"]).strip()
     for key in ("ploidy", "subgenomes"):
@@ -177,6 +178,22 @@ def resolve_profile(config=None):
         sources[key] = profile["name"]
 
     custom = config.get("thresholds") or {}
+    if not isinstance(custom, dict):
+        raise VCFError("自定义阈值必须是键值对象")
+    if profile["kingdom"] == "animal":
+        if profile_id != "custom":
+            raise VCFError("动物数据只能使用“自定义物种与阈值”Profile")
+        if not profile.get("species_name"):
+            raise VCFError("动物自定义分析必须填写物种名称")
+        if profile.get("genotype_ploidy") == "auto":
+            raise VCFError("动物自定义分析必须明确选择VCF GT编码倍性，不能使用自动识别")
+        if profile.get("mating_system") in {None, "", "unknown"}:
+            raise VCFError("动物自定义分析必须明确选择繁殖/材料类型")
+        missing = [key for key in ANIMAL_REQUIRED_THRESHOLDS if custom.get(key) in (None, "")]
+        if missing:
+            raise VCFError("动物自定义分析还缺少核心阈值：{}".format("、".join(missing)))
+        if config.get("animal_parameters_confirmed") is not True:
+            raise VCFError("动物自定义分析必须确认：参数由使用者依据物种、群体设计和测序方案自行设定")
     for key in thresholds:
         if key in custom and custom[key] not in ("",):
             thresholds[key] = _number(custom[key], key, allow_none=True)
@@ -204,6 +221,8 @@ def resolve_profile(config=None):
             raise VCFError("杂合率 warning 不能高于 critical")
 
     profile.pop("overrides", None)
+    profile["analysis_scope"] = "non_plant_custom" if profile["kingdom"] != "plant" else ("plant_custom" if profile_id == "custom" else "plant_builtin")
+    profile["parameter_responsibility"] = "user" if profile["analysis_scope"] == "non_plant_custom" else "callvcf_plant_profile_or_user_override"
     profile["thresholds"] = thresholds
     profile["threshold_sources"] = sources
     profile["interpretation"] = {

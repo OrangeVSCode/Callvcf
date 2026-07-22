@@ -58,7 +58,7 @@
       </div>
       <div class="workflow-track">
         <article class="workflow-card" id="workflowLoad"><span class="workflow-index">1</span><div><b>载入与识别</b><small>格式、样本、类型、索引与查询方式</small></div><i>等待</i></article>
-        <article class="workflow-card" id="workflowAssess"><span class="workflow-index">2</span><div><b>质量评估</b><small>物种 Profile、样本/位点及群体证据</small></div><i>等待</i></article>
+        <article class="workflow-card" id="workflowAssess"><span class="workflow-index">2</span><div><b>植物质量评估</b><small>植物 Profile、样本/位点及群体证据</small></div><i>等待</i></article>
         <article class="workflow-card" id="workflowQc"><span class="workflow-index">3</span><div><b>质控与复评</b><small>保守默认或自定义；始终生成新副本</small></div><i>可选</i></article>
         <article class="workflow-card" id="workflowExplore"><span class="workflow-index">4</span><div><b>查询与关联解释</b><small>位点、样本、Lead、LD、表型和注释</small></div><i>等待</i></article>
       </div>
@@ -206,16 +206,16 @@
 
       <div class="tab-pane" id="pane-quality">
         <div class="pane-intro">
-          <div><h3>VCF 深度质量评估</h3><p>按文件、位点、样本和群体四层扫描，输出可离线打开和下载的报告包。</p></div>
+          <div><h3>植物 VCF 深度质量评估</h3><p>内置解释体系聚焦植物、育种材料和多倍体；动物仅允许使用者完整自定义参数。</p></div>
           <div class="button-row"><button class="secondary hidden" id="qualityCancelBtn">取消</button><button class="primary" id="qualityRunBtn">开始评估</button></div>
         </div>
         <div class="quality-layout">
           <section class="quality-config-card">
-            <h4>物种、基因组与解释 Profile</h4>
+            <h4>植物物种、基因组与解释 Profile</h4>
             <div class="advanced-grid">
               <label class="field span-2"><span>推荐 Profile</span><select id="qualityProfile"></select><small id="qualityProfileNote"></small></label>
-              <label class="field"><span>物种名称</span><input id="qualitySpecies" type="text" placeholder="例如：陆地棉、玉米、人"></label>
-              <label class="field"><span>生物类别</span><select id="qualityKingdom"><option value="plant">植物</option><option value="animal">动物</option><option value="fungus">真菌</option><option value="microbe">微生物/细胞器</option><option value="other">其他</option></select></label>
+              <label class="field"><span>物种名称</span><input id="qualitySpecies" type="text" placeholder="例如：陆地棉、玉米、水稻"></label>
+              <label class="field"><span>生物类别</span><select id="qualityKingdom"><option value="plant">植物</option><option value="animal">动物（仅自定义）</option><option value="fungus">真菌（仅自定义）</option><option value="microbe">微生物（仅自定义）</option><option value="other">其他（仅自定义）</option></select><small>内置Profile锁定为植物；非植物必须选择自定义。</small></label>
               <label class="field"><span>倍性/染色体组拷贝数</span><input id="qualityPloidy" type="number" min="1" max="16" value="2"></label>
               <label class="field"><span>VCF GT编码倍性</span><select id="qualityGenotypePloidy"><option value="auto">自动识别（推荐）</option><option value="1">单倍体GT</option><option value="2">二倍体GT</option><option value="3">三倍体GT</option><option value="4">四倍体GT</option><option value="6">六倍体GT</option><option value="8">八倍体GT</option></select><small>与物种生物学倍性分开；棉花VCF常采用二倍体编码。</small></label>
               <label class="field"><span>亚基因组数量</span><input id="qualitySubgenomes" type="number" min="1" max="16" value="1"></label>
@@ -227,8 +227,13 @@
               <label class="field"><span>样本元数据 TSV/CSV（可选）</span><div class="resource-input"><input id="qualitySampleMetaPath" type="text" placeholder="sample_id、group/variety、batch"><button class="secondary browse-resource" data-target="qualitySampleMetaPath" data-kind="sample_meta">选择…</button></div></label>
               <label class="field"><span>重复区/黑名单 BED（可选）</span><div class="resource-input"><input id="qualityRegionBedPath" type="text" placeholder="BED前三列；可含第4列区域名称"><button class="secondary browse-resource" data-target="qualityRegionBedPath" data-kind="bed">选择…</button></div></label>
             </div>
+            <div class="species-focus-note"><b>当前定位：植物分析</b><span>内置阈值覆盖二倍体植物、自交系、棉花、多倍体和植物单倍体/细胞器材料。</span></div>
+            <div class="animal-custom-guard hidden" id="animalCustomGuard">
+              <div><b>动物数据：必须由使用者完整定义参数</b><span id="animalCustomStatus">尚未完成参数设置。</span></div>
+              <label><input id="animalParametersConfirmed" type="checkbox"><span>我已依据动物物种、群体设计、繁殖方式和测序方案核对这些阈值，并承担结果解释责任。</span></label>
+            </div>
           </section>
-          <details class="quality-config-card" open>
+          <details class="quality-config-card" id="qualityThresholdDetails" open>
             <summary>自定义质量阈值（留空则使用 Profile）</summary>
             <p class="sub">比例统一填写0–1。报告会同时记录Profile默认值、用户覆盖值和最终生效来源。</p>
             <div class="threshold-grid">

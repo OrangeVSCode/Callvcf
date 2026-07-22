@@ -14,7 +14,7 @@ from vcf_service import PurePythonVCFService
 from advanced_analysis import AdvancedAnalyzer, genotype_dosage, pairwise_r2, pairwise_dprime, parse_region, parse_trait_directions
 from tool_manager import tools_status
 from quality_engine import QualityEvaluator, QualityJobManager, render_report, _svg_ld_decay, _svg_sample_qc, build_analysis_readiness
-from quality_profiles import resolve_profile
+from quality_profiles import profile_catalog, resolve_profile
 from population_analysis import PopulationAnalyzer
 from repair_engine import RepairExecutor, _quality_comparison
 
@@ -32,6 +32,32 @@ def bgzf_block(data):
 
 
 class CoreTests(unittest.TestCase):
+    def test_quality_profiles_are_plant_focused_and_animal_requires_explicit_custom_parameters(self):
+        catalog = profile_catalog()
+        self.assertFalse(any(x["id"] == "generic_diploid_animal" for x in catalog))
+        self.assertTrue(all(x["kingdom"] == "plant" for x in catalog if x["id"] != "custom"))
+        with self.assertRaisesRegex(Exception, "内置Profile仅用于植物"):
+            resolve_profile({"profile_id": "generic_diploid_plant", "kingdom": "animal"})
+
+        animal = {
+            "profile_id": "custom", "kingdom": "animal", "species_name": "测试动物",
+            "ploidy": 2, "genotype_ploidy": 2, "subgenomes": 1, "mating_system": "outcrossing",
+            "thresholds": {
+                "sample_missing_warn": .05, "sample_missing_critical": .10,
+                "site_missing_warn": .10, "site_missing_critical": .20,
+                "median_dp_min_warn": 5, "median_dp_max_warn": 100,
+                "median_gq_warn": 20, "median_gq_critical": 10,
+                "ab_lower": .25, "ab_upper": .75, "maf_structure": .05, "hwe_p_warn": 1e-6,
+            },
+        }
+        with self.assertRaisesRegex(Exception, "必须确认"):
+            resolve_profile(animal)
+        animal["animal_parameters_confirmed"] = True
+        resolved = resolve_profile(animal)
+        self.assertEqual(resolved["analysis_scope"], "non_plant_custom")
+        self.assertEqual(resolved["parameter_responsibility"], "user")
+        self.assertTrue(all(resolved["threshold_sources"][key] == "用户自定义" for key in animal["thresholds"]))
+
     def test_genotype_categories(self):
         self.assertEqual(normalize_genotype("0/0"), "HOM_REF")
         self.assertEqual(normalize_genotype("0|1"), "HET")
@@ -389,7 +415,10 @@ class CoreTests(unittest.TestCase):
         html = (root / "static" / "index.html").read_text(encoding="utf-8")
         js = (root / "static" / "app.js").read_text(encoding="utf-8")
         self.assertIn('id="workflowPanel"', html)
+        self.assertIn('id="animalCustomGuard"', html)
+        self.assertIn("动物（仅自定义）", html)
         self.assertIn("function activateTab", js)
+        self.assertIn("function validateSpeciesFocus", js)
         self.assertIn("quality-samples", js)
 
     def test_quality_control_copy_runs_full_audit_with_simulated_backend(self):

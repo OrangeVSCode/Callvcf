@@ -4,6 +4,7 @@
 
 ## 已实现
 
+- 分析定位收紧为植物VCF：内置Profile仅覆盖植物、育种材料、多倍体、棉花和植物单倍体/细胞器；动物仅允许走自定义入口，且必须明确物种、GT倍性、繁殖方式、12项核心阈值和责任确认，后端同步校验。
 - Header、reference/source/FILTER/INFO/FORMAT/contig 审计，排序、畸形记录、相邻重复和 INDEL 最简表达检查。
 - SNP、INDEL、MNP、SVTYPE/BND/CNV 分类，FILTER、Ti/Tv、MAF、位点缺失率和 1 Mb 密度热点。
 - QUAL、QD、MQ、FS、SOR、MQRankSum、ReadPosRankSum 的覆盖率和分位数。
@@ -30,7 +31,7 @@
 ## 不由 VCF 单独下结论
 
 - 污染比例、测序/比对质量、CNV read-depth 证据需要 BAM/CRAM 或专用 sidecar。
-- 临床致病性、外部人群频率和疾病数据库仅适用于配置了相应物种数据库的插件。
+- 临床致病性、外部人群频率和疾病数据库不属于当前植物聚焦范围；非植物数据即使使用自定义参数，也不提供这类动物/临床默认解释。
 - UMAP 只适合辅助浏览，不替代 PCA/亲缘估计，当前不作为质量判定。
 
 ## 解释限制

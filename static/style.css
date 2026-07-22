@@ -241,6 +241,15 @@ summary { padding: 10px 16px; color: var(--brand); font-size: 12px; font-weight:
 .quality-config-card { padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: #fbfdfc; }
 .quality-config-card h4 { margin: 0 0 14px; font-size: 17px; }
 .quality-config-card summary { cursor: pointer; color: var(--brand-dark); font-weight: 750; }
+.species-focus-note, .animal-custom-guard { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-top: 14px; padding: 13px 15px; border-radius: 12px; }
+.species-focus-note { border: 1px solid #b8d8ca; background: #edf7f2; color: #275c4d; }
+.species-focus-note b, .species-focus-note span, .animal-custom-guard b, .animal-custom-guard span { display: block; }
+.species-focus-note span, .animal-custom-guard span { font-size: 12px; line-height: 1.55; }
+.animal-custom-guard { border: 1px solid #d89469; background: #fff2e8; color: #7c381d; }
+.animal-custom-guard > div { flex: 1; }
+.animal-custom-guard label { display: flex; align-items: flex-start; gap: 8px; max-width: 520px; cursor: pointer; }
+.animal-custom-guard.ready { border-color: #72aa91; background: #ebf7f1; color: #235c48; }
+.field select:disabled { cursor: not-allowed; background: #edf2ee; color: #6d7c75; }
 .module-check-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:12px 0; }
 .module-check-grid label { display:flex; gap:10px; align-items:flex-start; padding:13px; border:1px solid var(--line); border-radius:12px; background:white; cursor:pointer; }
 .module-check-grid input { margin-top:3px; accent-color:var(--brand); }
