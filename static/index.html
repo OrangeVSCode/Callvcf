@@ -4,24 +4,40 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="本地基因型、表型质量控制与关联分析工具">
-  <title>GPA-Accelerator · 基因型与表型分析</title>
-  <link rel="stylesheet" href="/style.css">
+  <meta name="application-name" content="GPA-Accelerator">
+  <meta name="theme-color" content="#0b5d4f">
+  <title>GPA-Accelerator | 植物基因型与表型分析</title>
+  <link rel="stylesheet" href="/style.css?v=20260722-ui2">
 </head>
 <body>
-  <header class="topbar">
-    <div>
-      <p class="eyebrow">GENOTYPE · PHENOTYPE · ASSOCIATION</p>
-      <h1>GPA-Accelerator</h1>
-      <p class="lede">连接基因型、表型质控、多环境统计与关联解释的本地分析工具。</p>
-    </div>
+  <header class="topbar" id="appTop">
+    <a class="brand-lockup" href="#section-source" aria-label="GPA-Accelerator 首页">
+      <span class="brand-mark" aria-hidden="true"><i>G</i><i>A</i></span>
+      <span class="brand-copy">
+        <span class="eyebrow">GENOTYPE · PHENOTYPE · ASSOCIATION</span>
+        <span class="brand-title">GPA-Accelerator</span>
+        <span class="lede">连接植物基因型、表型质控、多环境统计与关联解释。</span>
+        <span class="hero-tags"><i>数据仅在本机处理</i><i>植物分析优先</i><i>VCF + 表型一体化</i></span>
+      </span>
+    </a>
     <div class="top-actions">
       <div class="status-pill" id="serverStatus"><span></span>正在连接</div>
       <button class="quiet-button" id="shutdownBtn" title="关闭本地 GPA-Accelerator">关闭工具</button>
     </div>
   </header>
 
+  <div class="quick-nav-shell">
+    <nav class="quick-nav" aria-label="页面快捷导航">
+      <a href="#section-source" data-section-link="section-source"><span>01</span>载入数据</a>
+      <a href="#workflowPanel" data-section-link="workflowPanel"><span>02</span>分析流程</a>
+      <a href="#section-query" data-section-link="section-query"><span>03</span>查询条件</a>
+      <a href="#section-analysis" data-section-link="section-analysis"><span>04</span>分析功能</a>
+      <span class="nav-context" id="navContext">尚未载入 VCF</span>
+    </nav>
+  </div>
+
   <main>
-    <section class="panel source-panel">
+    <section class="panel source-panel" id="section-source">
       <div class="section-heading">
         <div><span class="step">01</span><h2>选择 VCF</h2></div>
         <p>通过系统文件选择框载入本机 VCF/VCF.GZ，或直接粘贴文件路径。</p>
@@ -69,7 +85,7 @@
       </div>
     </section>
 
-    <section class="panel query-panel">
+    <section class="panel query-panel" id="section-query">
       <div class="section-heading">
         <div><span class="step">02</span><h2>输入查询条件</h2></div>
         <p>位点支持 <code>chr:pos</code> 或 <code>chr pos</code>，可换行、逗号或分号分隔。</p>
@@ -95,22 +111,27 @@
       </div>
     </section>
 
-    <section class="panel results-panel">
+    <section class="panel results-panel" id="section-analysis">
       <div class="section-heading compact">
         <div><span class="step">03</span><h2>选择分析</h2></div>
       </div>
-      <div class="tabs" role="tablist" aria-label="分析类型">
-        <button class="tab active" data-tab="existence" role="tab">位点是否存在</button>
-        <button class="tab" data-tab="distribution" role="tab">位点基因型分布</button>
-        <button class="tab" data-tab="matrix" role="tab">样本 × 位点</button>
-        <button class="tab" data-tab="stats" role="tab">样本全局统计</button>
-        <button class="tab" data-tab="lead" role="tab">Lead 位点高级分析</button>
-        <button class="tab" data-tab="sample-lead" role="tab">样本 Lead-SNP 画像</button>
-        <button class="tab" data-tab="phenotype-qc" role="tab">表型质控与统计</button>
-        <button class="tab" data-tab="variant-phenotype" role="tab">位点 × 表型</button>
-        <button class="tab" data-tab="similarity" role="tab">样本相似性与亲缘</button>
-        <button class="tab" data-tab="quality" role="tab">VCF 质量评估</button>
+      <div class="tab-navigation">
+        <button class="tab-scroll" id="tabScrollLeft" aria-label="向左查看更多分析">‹</button>
+        <div class="tabs" id="analysisTabs" role="tablist" aria-label="分析类型">
+          <button class="tab active" data-tab="existence" role="tab" aria-selected="true" tabindex="0">位点是否存在</button>
+          <button class="tab" data-tab="distribution" role="tab" aria-selected="false" tabindex="-1">位点基因型分布</button>
+          <button class="tab" data-tab="matrix" role="tab" aria-selected="false" tabindex="-1">样本 × 位点</button>
+          <button class="tab" data-tab="stats" role="tab" aria-selected="false" tabindex="-1">样本全局统计</button>
+          <button class="tab" data-tab="lead" role="tab" aria-selected="false" tabindex="-1">Lead 位点高级分析</button>
+          <button class="tab" data-tab="sample-lead" role="tab" aria-selected="false" tabindex="-1">样本 Lead-SNP 画像</button>
+          <button class="tab" data-tab="phenotype-qc" role="tab" aria-selected="false" tabindex="-1">表型质控与统计</button>
+          <button class="tab" data-tab="variant-phenotype" role="tab" aria-selected="false" tabindex="-1">位点 × 表型</button>
+          <button class="tab" data-tab="similarity" role="tab" aria-selected="false" tabindex="-1">样本相似性与亲缘</button>
+          <button class="tab" data-tab="quality" role="tab" aria-selected="false" tabindex="-1">VCF 质量评估</button>
+        </div>
+        <button class="tab-scroll" id="tabScrollRight" aria-label="向右查看更多分析">›</button>
       </div>
+      <p class="tab-hint">可左右滚动查看更多功能；使用键盘方向键也可切换。</p>
 
       <div class="tab-pane active" id="pane-existence">
         <div class="pane-intro"><div><h3>批量检查位点</h3><p>确认输入位置是否存在，并列出 REF、ALT、类型与记录 ID。</p></div><button class="primary run-btn" data-action="check">开始检查</button></div>
@@ -497,10 +518,11 @@
     </section>
   </main>
 
+  <button class="back-to-top" id="backToTopBtn" aria-label="返回页面顶部" title="返回顶部">↑</button>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <div class="modal-backdrop hidden" id="dangerRepairModal" role="dialog" aria-modal="true" aria-labelledby="dangerRepairTitle">
     <div class="confirm-modal"><span class="danger-icon">!</span><h3 id="dangerRepairTitle">危险修复必须二次确认</h3><p id="dangerRepairDescription">危险计划会改变记录表达或记录集合。请逐项核对输入、输出和实际命令；原VCF不会被覆盖。</p><div class="danger-list" id="dangerPlanSummary"><b>永不支持：</b>覆盖原VCF或已有目标、删除文件、静默改写GT。</div><label class="field"><span id="dangerConfirmLabel">确认短语</span><input id="dangerConfirmText" autocomplete="off"></label><div class="modal-actions"><button class="secondary" id="dangerCancelBtn">返回</button><button class="danger-button" id="dangerConfirmBtn" disabled>确认并执行</button></div></div>
   </div>
-  <script src="/app.js" defer></script>
+  <script src="/app.js?v=20260722-ui2" defer></script>
 </body>
 </html>

@@ -64,7 +64,9 @@ function selectedSamples(required = true) {
 function setLoading(target, button, message = "正在查询…") {
   target.className = "result-body loading";
   target.textContent = message;
+  target.setAttribute("aria-busy", "true");
   button.disabled = true;
+  button.setAttribute("aria-busy", "true");
   const old = button.textContent;
   button.dataset.oldText = old;
   button.textContent = "处理中…";
@@ -72,7 +74,9 @@ function setLoading(target, button, message = "正在查询…") {
 
 function clearLoading(target, button) {
   target.className = "result-body";
+  target.removeAttribute("aria-busy");
   button.disabled = false;
+  button.removeAttribute("aria-busy");
   button.textContent = button.dataset.oldText || button.textContent;
 }
 
@@ -148,7 +152,7 @@ async function inspectVCF() {
   try {
     const meta = await api("/api/inspect", { path: currentPath() });
     state.metadata = meta;
-    localStorage.setItem("vcfExplorerPath", meta.path);
+    localStorage.setItem("gpaVcfPath", meta.path);
     renderMetadata(meta);
     updateWorkflow();
     toast(`已载入 ${meta.name}，${meta.sample_count} 个样本`);
@@ -522,12 +526,12 @@ function renderLeadResult(data) {
 
 function saveAdvancedSettings() {
   const ids = ["gffPath", "annotationPath", "domainPath", "phenotypePath", "ldblockshowPath", "outputDir", "ldblockshowMetric", "ldblockshowBlockType", "ldWindow", "ldThreshold", "ldMinSamples", "ldMode", "ldRegion", "leadLoci", "heatmapMaxVariants", "profilePhenotypePath", "profilePThreshold", "traitDirections"];
-  localStorage.setItem("vcfExplorerAdvanced", JSON.stringify(Object.fromEntries(ids.map(id => [id, $(id).value]))));
+  localStorage.setItem("gpaAdvancedSettings", JSON.stringify(Object.fromEntries(ids.map(id => [id, $(id).value]))));
 }
 
 function restoreAdvancedSettings() {
   try {
-    const saved = JSON.parse(localStorage.getItem("vcfExplorerAdvanced") || "{}");
+    const saved = JSON.parse(localStorage.getItem("gpaAdvancedSettings") || localStorage.getItem("vcfExplorerAdvanced") || "{}");
     Object.entries(saved).forEach(([id, value]) => { if ($(id)) $(id).value = value; });
   } catch (_) {}
 }
@@ -855,10 +859,76 @@ function validateSpeciesFocus() {
 function activateTab(name, scroll = true) {
   const tab = document.querySelector(`.tab[data-tab="${name}"]`);
   if (!tab) return;
-  document.querySelectorAll(".tab").forEach(item => item.classList.toggle("active", item === tab));
-  document.querySelectorAll(".tab-pane").forEach(item => item.classList.toggle("active", item.id === `pane-${name}`));
+  document.querySelectorAll(".tab").forEach(item => {
+    const active = item === tab;
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-selected", active ? "true" : "false");
+    item.tabIndex = active ? 0 : -1;
+  });
+  document.querySelectorAll(".tab-pane").forEach(item => {
+    const active = item.id === `pane-${name}`;
+    item.classList.toggle("active", active);
+    item.hidden = !active;
+  });
   state.activeTab = name;
+  localStorage.setItem("gpaActiveAnalysisTab", name);
+  tab.scrollIntoView({behavior:"smooth", block:"nearest", inline:"center"});
   if (scroll) document.querySelector(".results-panel")?.scrollIntoView({behavior:"smooth", block:"start"});
+}
+
+function refreshNavigationContext() {
+  const target = $("navContext");
+  if (!target) return;
+  if (state.metadata) target.textContent = `${state.metadata.name} · ${formatNumber(state.metadata.sample_count)} 个样本`;
+  else if ($("vcfPath")?.value.trim()) target.textContent = "文件路径待载入识别";
+  else target.textContent = "尚未载入 VCF";
+}
+
+function initializePageNavigation() {
+  document.title = "GPA-Accelerator | 植物基因型与表型分析";
+  const tabs = [...document.querySelectorAll(".tab")];
+  tabs.forEach(tab => {
+    tab.id = `tab-${tab.dataset.tab}`;
+    tab.setAttribute("aria-controls", `pane-${tab.dataset.tab}`);
+    const pane = $(`pane-${tab.dataset.tab}`);
+    if (pane) {
+      pane.setAttribute("role", "tabpanel");
+      pane.setAttribute("aria-labelledby", tab.id);
+      pane.hidden = !tab.classList.contains("active");
+    }
+  });
+  $("analysisTabs")?.addEventListener("keydown", event => {
+    if (!["ArrowLeft","ArrowRight","Home","End"].includes(event.key)) return;
+    event.preventDefault();
+    const current = Math.max(0, tabs.indexOf(document.activeElement));
+    const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length-1 : event.key === "ArrowRight" ? (current+1)%tabs.length : (current-1+tabs.length)%tabs.length;
+    activateTab(tabs[next].dataset.tab, false);
+    tabs[next].focus();
+  });
+  const scrollTabs = direction => {
+    const strip = $("analysisTabs");
+    if (strip) strip.scrollBy({left:direction*Math.min(520,Math.max(260,strip.clientWidth*.72)),behavior:"smooth"});
+  };
+  $("tabScrollLeft")?.addEventListener("click", () => scrollTabs(-1));
+  $("tabScrollRight")?.addEventListener("click", () => scrollTabs(1));
+  $("backToTopBtn")?.addEventListener("click", () => window.scrollTo({top:0,behavior:"smooth"}));
+  let scheduled = false;
+  const updateScrollUi = () => {
+    scheduled = false;
+    $("backToTopBtn")?.classList.toggle("visible", window.scrollY > 520);
+    const links = [...document.querySelectorAll("[data-section-link]")];
+    let current = links[0];
+    links.forEach(link => {
+      const section = $(link.dataset.sectionLink);
+      if (section && section.getBoundingClientRect().top <= 190) current = link;
+    });
+    links.forEach(link => link.classList.toggle("active", link === current));
+  };
+  window.addEventListener("scroll", () => {
+    if (!scheduled) { scheduled=true; requestAnimationFrame(updateScrollUi); }
+  }, {passive:true});
+  updateScrollUi();
+  refreshNavigationContext();
 }
 
 function setWorkflowCard(id, status, label) {
@@ -875,6 +945,7 @@ function qualityWarningSamples(data) {
 
 function updateWorkflow() {
   if (!$("workflowSummary")) return;
+  refreshNavigationContext();
   const loaded = !!state.metadata;
   const assessed = state.qualityRun?.status === "complete";
   const explored = !!(state.lastResult || state.lastLeadResult || state.lastProfileResult);
@@ -1570,12 +1641,13 @@ function initEvents() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  const saved = localStorage.getItem("vcfExplorerPath");
+  const saved = localStorage.getItem("gpaVcfPath") || localStorage.getItem("vcfExplorerPath");
   if (saved) $("vcfPath").value = saved;
   const savedPhenotype = localStorage.getItem("gpaPhenotypePath");
   if (savedPhenotype) $("phenotypeDataPath").value = savedPhenotype;
   const savedAssociationPhenotype = localStorage.getItem("gpaAssociationPhenotypePath");
   if (savedAssociationPhenotype) $("associationPhenotypePath").value = savedAssociationPhenotype;
+  initializePageNavigation();
   initEvents();
   restoreAdvancedSettings();
   loadToolStatus();
@@ -1584,6 +1656,8 @@ document.addEventListener("DOMContentLoaded", () => {
   updateRepairFields();
   updateQcMode();
   updateWorkflow();
+  const savedTab = localStorage.getItem("gpaActiveAnalysisTab");
+  if (savedTab) activateTab(savedTab, false);
   $("ldMode").dispatchEvent(new Event("change"));
   checkHealth();
 });

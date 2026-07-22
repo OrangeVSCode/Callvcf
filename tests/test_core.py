@@ -790,6 +790,21 @@ class CoreTests(unittest.TestCase):
         self.assertIn("/api/similarity/start", js)
         self.assertIn("KING-robust 亲缘系数热图", js)
 
+    def test_gpa_accelerator_interface_brand_and_navigation(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "static" / "index.html").read_text(encoding="utf-8")
+        css = (root / "static" / "style.css").read_text(encoding="utf-8")
+        js = (root / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("<title>GPA-Accelerator | 植物基因型与表型分析</title>", html)
+        self.assertIn('class="brand-title">GPA-Accelerator</span>', html)
+        self.assertIn('id="analysisTabs"', html)
+        self.assertIn('id="backToTopBtn"', html)
+        self.assertNotIn(">VCF Explorer<", html)
+        for selector in (".quick-nav", ".tab-navigation", ".back-to-top"):
+            self.assertIn(selector, css)
+        self.assertIn("function initializePageNavigation", js)
+        self.assertIn("gpaActiveAnalysisTab", js)
+
 
 if __name__ == "__main__":
     unittest.main()
