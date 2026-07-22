@@ -3,6 +3,7 @@ import os
 import struct
 import sys
 import tempfile
+import time
 import unittest
 import zlib
 from pathlib import Path
@@ -20,6 +21,7 @@ from repair_engine import RepairExecutor, _quality_comparison
 from phenotype_engine import PhenotypeAnalyzer, phenotype_catalog
 from association_engine import VariantPhenotypeAnalyzer
 from emmax_engine import EmmaxJobManager
+from similarity_engine import SimilarityJobManager, _parse_kin0
 
 
 def bgzf_block(data):
@@ -203,12 +205,35 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(ph["threshold"]["mean"], [100, 180])
             self.assertEqual(len(ph["year_summaries"]), 3)
             self.assertIsNotNone(ph["variance_components"]["broad_sense_h2_entry_mean"])
+            heritability = ph["heritability"]
+            self.assertEqual(heritability["status"], "estimated")
+            self.assertTrue(heritability["design"]["balanced"])
+            self.assertEqual(len(heritability["by_environment"]), 3)
+            for key in ("single_observation_h2", "within_environment_entry_mean_h2", "multi_environment_entry_mean_h2"):
+                self.assertIsNotNone(heritability[key])
+                self.assertGreaterEqual(heritability[key], 0)
+                self.assertLessEqual(heritability[key], 1)
             names = {x["name"] for x in output["artifacts"]}
-            self.assertTrue({"phenotype_report.html", "trait_statistics.tsv", "replicate_averages.tsv", "blue_blup_estimates.tsv", "outlier_candidates.tsv", "cotton_thresholds.tsv", "GPA_Accelerator_phenotype_QC.zip"}.issubset(names))
+            self.assertTrue({"phenotype_report.html", "heritability_report.html", "heritability_summary.tsv", "heritability_by_environment.tsv", "heritability_overview.svg", "trait_statistics.tsv", "replicate_averages.tsv", "blue_blup_estimates.tsv", "outlier_candidates.tsv", "cotton_thresholds.tsv", "GPA_Accelerator_phenotype_QC.zip"}.issubset(names))
             report = analyzer.artifact(output["run_id"], "phenotype_report.html").read_text(encoding="utf-8")
             self.assertIn("时间动态", report)
             self.assertIn("地理分布动态", report)
             self.assertIn("BLUE/BLUP", report)
+            heritability_report = analyzer.artifact(output["run_id"], "heritability_report.html").read_text(encoding="utf-8")
+            self.assertIn("多年多点材料均值", heritability_report)
+            self.assertIn("Cullis", heritability_report)
+
+            no_repeat = Path(temp_name) / "phenotype_means.csv"
+            mean_rows = ["sample,trait,value,year,location"]
+            for sample_index, sample in enumerate(("C1", "C2", "C3", "C4", "C5")):
+                for year_index, year in enumerate((2022, 2023, 2024)):
+                    mean_rows.append(f"{sample},PH,{90+sample_index*3+year_index*.5},{year},A")
+            no_repeat.write_text("\n".join(mean_rows)+"\n", encoding="utf-8")
+            no_repeat_output = analyzer.analyze({"path":str(no_repeat),"output_dir":str(Path(temp_name)/"mean-reports"),"format":"long"})
+            no_repeat_h2 = no_repeat_output["result"]["traits"][0]["heritability"]
+            self.assertEqual(no_repeat_h2["status"], "partial")
+            self.assertIsNone(no_repeat_h2["multi_environment_entry_mean_h2"])
+            self.assertIsNotNone(no_repeat_h2["repeatability_of_observed_means"])
 
             from openpyxl import Workbook
             workbook = Workbook(); sheet = workbook.active; sheet.title = "Raw phenotype"
@@ -721,6 +746,49 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("HWE_EXCESS_DEVIATION", codes)
         self.assertEqual(result["summary"]["status"], "critical")
         self.assertLess(result["summary"]["score"], 92)
+
+    def test_similarity_engine_imports_king_kin0_and_builds_matrices(self):
+        with tempfile.TemporaryDirectory(prefix="gpa-similarity-kin0-") as temp_name:
+            root = Path(temp_name)
+            kin0 = root / "cotton.kin0"
+            kin0.write_text(
+                "#FID1 IID1 FID2 IID2 NSNP HETHET IBS0 KINSHIP\n"
+                "A A B B 1000 0.200 0.001 0.400\n"
+                "A A C C 1000 0.100 0.050 0.020\n"
+                "B B C C 1000 0.110 0.040 0.050\n",
+                encoding="utf-8",
+            )
+            parsed = _parse_kin0(kin0)
+            self.assertEqual(len(parsed), 3)
+            self.assertEqual(parsed[0]["ibs0_count"], 1)
+            self.assertAlmostEqual(parsed[0]["ibs0_rate"], 0.001)
+            manager = SimilarityJobManager()
+            job = manager.start({"kin0_path": str(kin0), "output_dir": str(root / "reports")})
+            for _ in range(200):
+                job = manager.status(job["id"])
+                if job["status"] in {"complete", "failed", "cancelled"}:
+                    break
+                time.sleep(.02)
+            self.assertEqual(job["status"], "complete", job.get("error"))
+            summary = job["result"]["summary"]
+            self.assertEqual(summary["samples"], 3)
+            self.assertEqual(summary["pairs"], 3)
+            self.assertEqual(summary["pairs_with_king"], 3)
+            self.assertEqual(summary["duplicate_candidates"], 1)
+            names = {item["name"] for item in job["artifacts"]}
+            self.assertIn("sample_similarity_report.html", names)
+            self.assertIn("king_robust_kinship_matrix.tsv", names)
+            self.assertIn("king_robust_heatmap.svg", names)
+            self.assertIn("GPA_Accelerator_sample_similarity.zip", names)
+
+    def test_similarity_page_exposes_multi_vcf_and_external_kin0_inputs(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "static" / "index.html").read_text(encoding="utf-8")
+        js = (root / "static" / "app.js").read_text(encoding="utf-8")
+        for element_id in ("similaritySnpPath", "similarityIndelPath", "similaritySvPath", "similarityKin0Path", "similarityRunBtn"):
+            self.assertIn('id="{}"'.format(element_id), html)
+        self.assertIn("/api/similarity/start", js)
+        self.assertIn("KING-robust 亲缘系数热图", js)
 
 
 if __name__ == "__main__":

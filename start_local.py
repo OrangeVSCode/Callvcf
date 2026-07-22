@@ -11,6 +11,7 @@ from advanced_analysis import AdvancedAnalyzer
 from quality_engine import QualityJobManager
 from phenotype_engine import PhenotypeAnalyzer
 from association_engine import VariantPhenotypeAnalyzer
+from similarity_engine import SimilarityJobManager
 from emmax_engine import EmmaxJobManager
 from repair_engine import RepairExecutor
 from vcf_service import create_service
@@ -44,6 +45,7 @@ def main():
     app_module.PHENOTYPE = PhenotypeAnalyzer()
     app_module.ASSOCIATION = VariantPhenotypeAnalyzer(app_module.SERVICE)
     app_module.EMMAX = EmmaxJobManager(app_module.SERVICE)
+    app_module.SIMILARITY = SimilarityJobManager()
     try:
         server = AppServer(("127.0.0.1", args.port), Handler)
     except OSError:

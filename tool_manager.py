@@ -22,6 +22,11 @@ PLINK_URLS = {
     "Windows": "https://s3.amazonaws.com/plink1-assets/plink_win64_20250819.zip",
     "Linux": "https://s3.amazonaws.com/plink1-assets/plink_linux_x86_64_20250819.zip",
 }
+PLINK2_VERSION = "2.00a7.1 (2026-05-04)"
+PLINK2_URLS = {
+    "Windows": "https://s3.amazonaws.com/plink2-assets/alpha7/plink2_win64_20260504.zip",
+    "Linux": "https://s3.amazonaws.com/plink2-assets/alpha7/plink2_linux_x86_64_20260504.zip",
+}
 LDBLOCKSHOW_URL = "https://codeload.github.com/hewm2008/LDBlockShow/zip/refs/heads/main"
 EMMAX_VERSION = "emmax-intel64-20120205 / binary distribution 20120210"
 EMMAX_ARCHIVE_SHA256 = "E2A582851BA1BE908757D4EF436E98AD76664A0C55E00D13E55FA35FE2BA54DD"
@@ -87,6 +92,16 @@ def resolve_plink(explicit=None):
     if installed.is_file():
         return str(installed)
     return shutil.which("plink")
+
+
+def resolve_plink2(explicit=None):
+    if explicit and Path(str(explicit)).expanduser().is_file():
+        return str(Path(str(explicit)).expanduser().resolve())
+    filename = "plink2.exe" if platform.system() == "Windows" else "plink2"
+    installed = tool_root() / "plink2" / filename
+    if installed.is_file():
+        return str(installed)
+    return shutil.which("plink2")
 
 
 def resolve_ldblockshow(explicit=None):
@@ -181,6 +196,7 @@ def _wsl_bcftools_path():
 def tools_status():
     system = platform.system()
     plink = resolve_plink()
+    plink2 = resolve_plink2()
     ldblockshow = resolve_ldblockshow()
     wsl_installed = _wsl_operational() if system == "Windows" else False
     native_bcftools = shutil.which("bcftools")
@@ -197,6 +213,8 @@ def tools_status():
         "tool_root": str(tool_root()), "platform": system,
         "plink": {"installed": bool(plink), "path": plink, "version": _probe(plink, ["--version"]),
                   "bundled_version": PLINK_VERSION, "license": "GPL-3.0"},
+        "plink2": {"installed": bool(plink2), "path": plink2, "version": _probe(plink2, ["--version"]),
+                    "bundled_version": PLINK2_VERSION, "license": "GPL-3.0", "purpose": "KING-robust kinship"},
         "ldblockshow": {"installed": bool(ldblockshow), "path": ldblockshow,
                         "version": "LDBlockShow (official hewm2008 build)" if ldblockshow else None,
                         "license": "MIT", "requires_wsl": system == "Windows",
@@ -230,18 +248,19 @@ def install_tool(name):
     with tempfile.TemporaryDirectory(prefix="callvcf-tool-") as temp_name:
         temp = Path(temp_name)
         archive = temp / "download.zip"
-        if name == "plink":
-            url = PLINK_URLS.get(platform.system())
+        if name in {"plink", "plink2"}:
+            is_plink2 = name == "plink2"
+            url = (PLINK2_URLS if is_plink2 else PLINK_URLS).get(platform.system())
             if not url:
-                raise VCFError("当前平台暂不支持自动安装 PLINK，请手动选择可执行文件")
+                raise VCFError("当前平台暂不支持自动安装 {}，请手动选择可执行文件".format("PLINK 2" if is_plink2 else "PLINK 1.9"))
             size, digest = _download(url, archive)
             extracted = temp / "extracted"
             _safe_extract(archive, extracted)
-            filename = "plink.exe" if platform.system() == "Windows" else "plink"
+            filename = ("plink2.exe" if platform.system() == "Windows" else "plink2") if is_plink2 else ("plink.exe" if platform.system() == "Windows" else "plink")
             source = next((p for p in extracted.rglob(filename) if p.is_file()), None)
             if not source:
-                raise VCFError("PLINK 官方压缩包中未找到 {}".format(filename))
-            destination = root / "plink"
+                raise VCFError("{} 官方压缩包中未找到 {}".format("PLINK 2" if is_plink2 else "PLINK",filename))
+            destination = root / name
             destination.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination / filename)
             for candidate in extracted.rglob("LICENSE*"):
@@ -249,8 +268,8 @@ def install_tool(name):
                     shutil.copy2(candidate, destination / candidate.name)
             if platform.system() != "Windows":
                 (destination / filename).chmod((destination / filename).stat().st_mode | stat.S_IEXEC)
-            _write_metadata("plink", {"source": url, "version": PLINK_VERSION,
-                                      "sha256": digest, "download_bytes": size, "license": "GPL-3.0"})
+            _write_metadata(name, {"source": url, "version": PLINK2_VERSION if is_plink2 else PLINK_VERSION,
+                                   "sha256": digest, "download_bytes": size, "license": "GPL-3.0"})
         elif name == "ldblockshow":
             size, digest = _download(LDBLOCKSHOW_URL, archive)
             extracted = temp / "extracted"

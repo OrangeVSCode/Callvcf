@@ -19,6 +19,7 @@ from phenotype_engine import PhenotypeAnalyzer
 from association_engine import VariantPhenotypeAnalyzer
 from emmax_engine import EmmaxJobManager
 from repair_engine import RepairExecutor
+from similarity_engine import SimilarityJobManager
 from tool_manager import install_tool, tools_status
 
 
@@ -31,6 +32,7 @@ REPAIR = None
 PHENOTYPE = None
 ASSOCIATION = None
 EMMAX = None
+SIMILARITY = None
 
 
 def _windows_dialog(kind="file", initial_dir=None):
@@ -51,6 +53,7 @@ def _windows_dialog(kind="file", initial_dir=None):
         "reference": "Reference FASTA|*.fa;*.fasta;*.fna;*.fa.gz;*.fasta.gz|All files|*.*",
         "executable": "Executable|*.exe|All files|*.*",
         "file": "All files|*.*",
+        "kin0": "KING kinship table|*.kin0;*.txt;*.tsv|All files|*.*",
     }
     if kind in {"directory", "phenotype_dir", "output_dir"}:
         script = "$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Windows.Forms;$d=New-Object System.Windows.Forms.FolderBrowserDialog;if($env:CALLVCF_DIALOG_INITIAL){$d.SelectedPath=$env:CALLVCF_DIALOG_INITIAL};if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){[Console]::OutputEncoding=[Text.Encoding]::UTF8;$d.SelectedPath}"
@@ -128,6 +131,7 @@ def select_resource(kind="file", initial_dir=None):
                 "phenotype_data": [("Phenotype data", "*.xlsx *.csv *.tsv *.txt *.ps *.phen *.pheno"), ("Excel workbook", "*.xlsx"), ("Delimited table", "*.csv *.tsv *.txt *.ps *.phen *.pheno"), ("All files", "*.*")],
                 "executable": [("Executable", "*.exe *"), ("All files", "*.*")],
                 "reference": [("Reference FASTA", "*.fa *.fasta *.fna *.fa.gz *.fasta.gz"), ("All files", "*.*")],
+                "kin0": [("KING kinship table", "*.kin0 *.txt *.tsv"), ("All files", "*.*")],
             }
             path = filedialog.askopenfilename(title="选择资源文件", filetypes=filters.get(kind, [("All files", "*.*")]), **kwargs)
     finally:
@@ -184,6 +188,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "data": QUALITY.catalog()})
         if parsed.path == "/api/phenotype/catalog":
             return self._json(200, {"ok": True, "data": PHENOTYPE.catalog()})
+        if parsed.path == "/api/similarity/catalog":
+            return self._json(200, {"ok": True, "data": SIMILARITY.catalog()})
         if parsed.path == "/api/repair/catalog":
             return self._json(200, {"ok": True, "data": REPAIR.catalog()})
         if parsed.path == "/api/quality/artifact":
@@ -249,6 +255,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers(); self.wfile.write(body); return
             except VCFError as exc:
                 return self._json(404, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/similarity/artifact":
+            try:
+                query = parse_qs(parsed.query); name=(query.get("name") or [""])[0]
+                path=SIMILARITY.artifact((query.get("run_id") or [""])[0],name); body=path.read_bytes(); mime=mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+                self.send_response(200); self.send_header("Content-Type",mime+("; charset=utf-8" if mime.startswith("text/") or mime in {"application/json","image/svg+xml"} else ""))
+                disposition="inline" if (query.get("view") or [""])[0]=="1" and path.suffix.lower() in {".html",".svg"} else "attachment"
+                self.send_header("Content-Disposition",'{}; filename="{}"'.format(disposition,path.name)); self.send_header("Content-Length",str(len(body))); self.send_header("Cache-Control","no-store"); self.end_headers(); self.wfile.write(body); return
+            except VCFError as exc:
+                return self._json(404,{"ok":False,"error":str(exc)})
         relative = "index.html" if parsed.path in {"", "/"} else unquote(parsed.path.lstrip("/"))
         candidate = (STATIC_DIR / relative).resolve()
         if STATIC_DIR not in candidate.parents and candidate != STATIC_DIR:
@@ -316,6 +331,12 @@ class Handler(BaseHTTPRequestHandler):
                 result = EMMAX.status(payload.get("run_id"))
             elif route == "/api/emmax/cancel":
                 result = EMMAX.cancel(payload.get("run_id"))
+            elif route == "/api/similarity/start":
+                result = SIMILARITY.start(payload)
+            elif route == "/api/similarity/status":
+                result = SIMILARITY.status(payload.get("run_id"))
+            elif route == "/api/similarity/cancel":
+                result = SIMILARITY.cancel(payload.get("run_id"))
             elif route == "/api/quality/status":
                 result = QUALITY.status(payload.get("run_id"))
             elif route == "/api/quality/cancel":
@@ -345,7 +366,7 @@ def main():
     parser.add_argument("--bcftools", default=os.environ.get("BCFTOOLS"))
     args = parser.parse_args()
 
-    global SERVICE, ADVANCED, QUALITY, REPAIR, PHENOTYPE, ASSOCIATION, EMMAX
+    global SERVICE, ADVANCED, QUALITY, REPAIR, PHENOTYPE, ASSOCIATION, EMMAX, SIMILARITY
     SERVICE = create_service(args.bcftools)
     ADVANCED = AdvancedAnalyzer(SERVICE)
     QUALITY = QualityJobManager(SERVICE)
@@ -353,6 +374,7 @@ def main():
     PHENOTYPE = PhenotypeAnalyzer()
     ASSOCIATION = VariantPhenotypeAnalyzer(SERVICE)
     EMMAX = EmmaxJobManager(SERVICE)
+    SIMILARITY = SimilarityJobManager()
     server = AppServer((args.host, args.port), Handler)
     print("GPA-Accelerator: http://{}:{}".format(args.host, args.port), flush=True)
     try:

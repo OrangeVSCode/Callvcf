@@ -9,6 +9,14 @@ GPA-Accelerator uses the following independent command-line tools. PLINK, LDBloc
 - License: GNU General Public License version 3
 - GPA-Accelerator preserves the license file included in the official PLINK archive.
 
+## PLINK 2
+
+- Project: https://www.cog-genomics.org/plink/2.0/
+- Version selected by GPA-Accelerator: alpha 7.1, 4 May 2026
+- License: GNU General Public License version 3
+- Purpose in GPA-Accelerator: KING-robust kinship coefficient and `.kin0` output for the sample-similarity workflow.
+- GPA-Accelerator downloads the official platform archive on demand and preserves its included license file.
+
 ## LDBlockShow
 
 - Project: https://github.com/hewm2008/LDBlockShow

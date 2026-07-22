@@ -1,4 +1,4 @@
-const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null, phenotypeResult: null, associationResult: null, emmaxJob: null, emmaxPoll: null, qualityCatalog: null, qualityRun: null, qualityPoll: null, qcRecommendation: null, repairCatalog: null, repairPlan: null, repairPoll: null, repairCompleted: false, applyingCropPreset: false };
+const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null, phenotypeResult: null, associationResult: null, emmaxJob: null, emmaxPoll: null, similarityJob: null, similarityPoll: null, qualityCatalog: null, qualityRun: null, qualityPoll: null, qcRecommendation: null, repairCatalog: null, repairPlan: null, repairPoll: null, repairCompleted: false, applyingCropPreset: false };
 const $ = (id) => document.getElementById(id);
 const categoryOrder = ["HOM_REF", "HET", "HOM_ALT", "MISSING", "OTHER"];
 const shortLabels = { HOM_REF: "0/0", HET: "0/1", HOM_ALT: "1/1", MISSING: "缺失", OTHER: "其他" };
@@ -543,12 +543,13 @@ async function browseResource(button) {
 
 function renderToolStatus(data) {
   state.tools = data;
-  const plink = data.plink, ldb = data.ldblockshow, bcf = data.bcftools, emmax = data.emmax;
+  const plink = data.plink, plink2 = data.plink2, ldb = data.ldblockshow, bcf = data.bcftools, emmax = data.emmax;
+  if ($("plink2Status")) $("plink2Status").textContent = plink2.installed ? `已就绪 · ${plink2.path}` : `未安装 · ${plink2.bundled_version}`;
   $("plinkStatus").textContent = plink.installed ? `已就绪 · ${plink.path}` : `未安装 · ${plink.bundled_version}`;
   $("ldblockshowStatus").textContent = ldb.installed ? (ldb.requires_wsl && !ldb.wsl_available ? `已下载 · 需先安装 WSL` : `已就绪 · ${ldb.path}`) : (ldb.requires_wsl && !ldb.wsl_available ? "未安装 · 需先启用 WSL" : "未安装");
   $("bcftoolsStatus").textContent = bcf.installed ? `已就绪 · ${bcf.path}` : (bcf.requires_wsl && !bcf.wsl_available ? "需先完成 Ubuntu/WSL 初始化" : "未安装 · 可一键安装");
   if ($("emmaxAssociationStatus")) $("emmaxAssociationStatus").textContent = emmax.ready ? `已就绪 · ${emmax.version}` : emmax.installed ? "已随包部署 · 完成 WSL/Ubuntu 初始化后可运行" : emmax.bundled ? "随安装包提供 · 点击部署" : "当前安装包未包含 EMMAX";
-  $("toolRoot").textContent = `工具目录：${data.tool_root}；PLINK GPL-3.0，LDBlockShow MIT，bcftools MIT/Expat（部分插件GPL），EMMAX MIT。`;
+  $("toolRoot").textContent = `工具目录：${data.tool_root}；PLINK/PLINK 2 GPL-3.0，LDBlockShow MIT，bcftools MIT/Expat（部分插件GPL），EMMAX MIT。`;
   document.querySelectorAll(".install-tool").forEach(button => {
     const installed = data[button.dataset.tool]?.installed;
     button.textContent = button.dataset.tool === "emmax" ? (installed ? "重新部署" : "部署/检查") : (installed ? "重新安装" : "一键安装");
@@ -564,7 +565,7 @@ async function loadToolStatus() {
     if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
     renderToolStatus(result.data);
   } catch (error) {
-    $("plinkStatus").textContent = "检测失败"; $("ldblockshowStatus").textContent = "检测失败"; $("bcftoolsStatus").textContent = "检测失败"; if ($("emmaxAssociationStatus")) $("emmaxAssociationStatus").textContent = "检测失败";
+    $("plinkStatus").textContent = "检测失败"; if ($("plink2Status")) $("plink2Status").textContent = "检测失败"; $("ldblockshowStatus").textContent = "检测失败"; $("bcftoolsStatus").textContent = "检测失败"; if ($("emmaxAssociationStatus")) $("emmaxAssociationStatus").textContent = "检测失败";
   }
 }
 
@@ -573,7 +574,7 @@ async function installTool(button) {
   button.disabled = true; button.textContent = "正在下载…";
   try {
     const result = await api("/api/tools/install", {tool});
-    renderToolStatus(result); toast(`${tool === "plink" ? "PLINK" : tool === "bcftools" ? "bcftools" : tool === "emmax" ? "EMMAX" : "LDBlockShow"} ${tool === "emmax" ? "部署完成" : "安装完成"}`);
+    renderToolStatus(result); toast(`${tool === "plink" ? "PLINK" : tool === "plink2" ? "PLINK 2" : tool === "bcftools" ? "bcftools" : tool === "emmax" ? "EMMAX" : "LDBlockShow"} ${tool === "emmax" ? "部署完成" : "安装完成"}`);
   } catch (error) { toast(error.message, true); button.textContent = oldText; }
   finally { button.disabled = false; }
 }
@@ -1249,18 +1250,22 @@ function renderPhenotypeResult(data) {
   const result = data.result, summary = result.summary;
   const artifacts = data.artifacts || [];
   const report = artifacts.find(x => x.name === "phenotype_report.html");
+  const heritabilityReport = artifacts.find(x => x.name === "heritability_report.html");
   const archive = artifacts.find(x => x.name.endsWith("phenotype_QC.zip"));
   const density = artifacts.find(x => x.name.startsWith("density_") && x.name.endsWith(".svg"));
+  const heritabilityFigure = artifacts.find(x => x.name === "heritability_overview.svg");
   const warningRows = (result.warnings || []).slice(0, 30).map(x => `<tr><td class="level-${escapeHtml(x.level)}">${escapeHtml(x.level)}</td><td>${escapeHtml(x.trait)}</td><td>${escapeHtml(x.message)}</td><td>${escapeHtml(x.evidence)}</td><td>${escapeHtml(x.advice)}</td></tr>`).join("") || '<tr><td colspan="5">当前规则下未发现报警。</td></tr>';
-  const traitRows = (result.traits || []).map(x => `<tr><td><b>${escapeHtml(x.trait)}</b><small>${escapeHtml(x.name || "")}</small></td><td>${formatNumber(x.summary.n)}</td><td>${Number(x.summary.mean).toPrecision(5)}</td><td>${Number(x.summary.sd).toPrecision(4)}</td><td>${x.variance_components.broad_sense_h2_entry_mean == null ? "—" : Number(x.variance_components.broad_sense_h2_entry_mean).toFixed(3)}</td><td>${formatNumber(x.outlier_count)}</td><td>${escapeHtml(x.threshold.confidence)}</td></tr>`).join("");
+  const h2 = value => value == null ? "—" : Number(value).toFixed(3);
+  const traitRows = (result.traits || []).map(x => { const h=x.heritability || {}, d=h.design || {}; return `<tr><td><b>${escapeHtml(x.trait)}</b><small>${escapeHtml(x.name || "")}</small></td><td>${formatNumber(x.summary.n)}</td><td>${formatNumber(d.genotypes || 0)} / ${formatNumber(d.environments || 0)} / ${d.effective_replicates == null ? "—" : Number(d.effective_replicates).toFixed(2)}</td><td>${h2(h.single_observation_h2)}</td><td>${h2(h.within_environment_entry_mean_h2)}</td><td>${h2(h.multi_environment_entry_mean_h2)}</td><td>${escapeHtml(h.confidence || "not_estimable")}</td><td>${formatNumber(x.outlier_count)}</td></tr>`; }).join("");
   const links = artifacts.filter(x => !x.name.startsWith("density_")).map(x => `<a class="artifact-link" href="${escapeHtml(x.url)}">${escapeHtml(x.name)}</a>`).join("");
   $("phenotypeResult").className = "result-body";
   $("phenotypeResult").innerHTML = `
     <div class="readiness-banner ${summary.status === "pass" ? "ready" : "caution"}"><b>${summary.status === "pass" ? "表型检查完成，未触发当前报警规则" : `表型检查完成：${formatNumber(summary.warnings)} 项需要复核`}</b><span>离群候选不会自动删除；BLUE/BLUP用于快速质控和排序，复杂空间或G×E模型请结合试验设计复核。</span></div>
-    <div class="quality-summary"><div class="meta-card"><span>观测值</span><strong>${formatNumber(summary.observations)}</strong></div><div class="meta-card"><span>材料</span><strong>${formatNumber(summary.samples)}</strong></div><div class="meta-card"><span>表型</span><strong>${formatNumber(summary.traits)}</strong></div><div class="meta-card"><span>年份 / 地点</span><strong>${formatNumber(summary.years)} / ${formatNumber(summary.locations)}</strong></div><div class="meta-card"><span>离群候选</span><strong>${formatNumber(summary.outliers)}</strong></div></div>
-    <div class="handoff-bar"><strong>报告与完整结果</strong>${report ? `<a class="artifact-link" target="_blank" rel="noopener" href="${escapeHtml(report.view_url)}">打开动态HTML报告</a>` : ""}${archive ? `<a class="artifact-link" href="${escapeHtml(archive.url)}">下载完整报告ZIP</a>` : ""}</div>
+    <div class="quality-summary"><div class="meta-card"><span>观测值</span><strong>${formatNumber(summary.observations)}</strong></div><div class="meta-card"><span>材料</span><strong>${formatNumber(summary.samples)}</strong></div><div class="meta-card"><span>表型</span><strong>${formatNumber(summary.traits)}</strong></div><div class="meta-card"><span>年份 / 地点</span><strong>${formatNumber(summary.years)} / ${formatNumber(summary.locations)}</strong></div><div class="meta-card"><span>可估计遗传力</span><strong>${formatNumber(summary.heritability_estimated || 0)}</strong></div><div class="meta-card"><span>离群候选</span><strong>${formatNumber(summary.outliers)}</strong></div></div>
+    <div class="handoff-bar"><strong>报告与完整结果</strong>${report ? `<a class="artifact-link" target="_blank" rel="noopener" href="${escapeHtml(report.view_url)}">打开动态HTML报告</a>` : ""}${heritabilityReport ? `<a class="artifact-link" target="_blank" rel="noopener" href="${escapeHtml(heritabilityReport.view_url)}">打开遗传力报告</a>` : ""}${archive ? `<a class="artifact-link" href="${escapeHtml(archive.url)}">下载完整报告ZIP</a>` : ""}</div>
     ${density ? `<section class="quality-section"><h4>密度分布图预览</h4><div class="phenotype-chart-preview"><img src="${escapeHtml(density.view_url)}" alt="表型密度分布"></div><p class="sub">完整报告可切换全部表型/年份，并提供时间播放和经纬度动态分布。</p></section>` : ""}
-    <section class="quality-section"><h4>统计、BLUE/BLUP与遗传力摘要</h4><div class="table-wrap"><table><thead><tr><th>表型</th><th>N</th><th>均值</th><th>SD</th><th>H²</th><th>离群</th><th>阈值置信度</th></tr></thead><tbody>${traitRows}</tbody></table></div></section>
+    ${heritabilityFigure ? `<section class="quality-section"><h4>广义遗传力概览</h4><div class="phenotype-chart-preview"><img src="${escapeHtml(heritabilityFigure.view_url)}" alt="遗传力概览"></div><p class="sub">H²取决于当前材料、环境和试验设计；缺少真实重复时不报告多年多点H²。</p></section>` : ""}
+    <section class="quality-section"><h4>统计、BLUE/BLUP与遗传力摘要</h4><div class="table-wrap"><table><thead><tr><th>表型</th><th>N</th><th>材料/环境/有效重复</th><th>单次观测H²</th><th>环境内均值H²</th><th>多年多点均值H²</th><th>遗传力置信度</th><th>离群</th></tr></thead><tbody>${traitRows}</tbody></table></div></section>
     <section class="quality-section"><h4>报警与复核建议</h4><div class="table-wrap"><table><thead><tr><th>级别</th><th>表型</th><th>问题</th><th>证据</th><th>建议</th></tr></thead><tbody>${warningRows}</tbody></table></div></section>
     <section class="quality-section"><h4>结果文件</h4><div class="artifact-list">${links}</div><p class="sub">输出目录：${escapeHtml(data.run_dir)}</p></section>`;
 }
@@ -1280,6 +1285,7 @@ async function runPhenotypeAnalysis() {
       cotton_species: $("phenotypeCottonSpecies").value, density_mode: $("phenotypeDensityMode").value,
       custom_thresholds: $("phenotypeCustomThresholds").value,
       shift_sd: phenotypeNumber("phenotypeShiftSd",1), trend_sd_per_year: phenotypeNumber("phenotypeTrendSd",.25),
+      heritability: {enabled:$("phenotypeHeritability").checked, minimum_genotypes:phenotypeNumber("phenotypeHeritabilityMinGenotypes",5), minimum_replicates:phenotypeNumber("phenotypeHeritabilityMinReplicates",2)},
       outlier: {iqr_factor:phenotypeNumber("phenotypeIqr",1.5), sigma:phenotypeNumber("phenotypeSigma",3), mad_z:phenotypeNumber("phenotypeMad",3.5), tail_fraction:phenotypeNumber("phenotypeTail",.005), consensus:phenotypeNumber("phenotypeConsensus",2)},
     });
     state.phenotypeResult = data;
@@ -1422,6 +1428,73 @@ async function cancelEmmaxAnalysis() {
   catch (error) { toast(error.message, true); }
 }
 
+function renderSimilarityJob(job) {
+  state.similarityJob = job;
+  const target = $("similarityResult"), button = $("similarityRunBtn"), cancel = $("similarityCancelBtn");
+  const running = !["complete", "failed", "cancelled"].includes(job.status);
+  button.disabled = running;
+  button.textContent = running ? "样本相似性计算中…" : "开始计算";
+  cancel.classList.toggle("hidden", !running);
+  if (running) {
+    target.className = "result-body";
+    target.innerHTML = `<div class="readiness-banner caution"><b>${escapeHtml(job.message || "正在运行")}</b><span>SNP、INDEL、SV会分别计算，再按共同样本对整合；可以切换页面，任务会继续。</span></div><div class="job-progress"><div style="width:${Math.max(1, Math.min(100, Number(job.progress) || 0))}%"></div></div><div class="quality-summary"><div class="meta-card"><span>进度</span><strong>${associationNumber(job.progress, 1)}%</strong></div><div class="meta-card"><span>任务</span><strong>${escapeHtml(job.id || "—")}</strong></div></div>`;
+    return;
+  }
+  if (job.status !== "complete") {
+    target.className = "result-body empty-state";
+    target.textContent = job.error || job.message || "样本相似性任务未完成";
+    return;
+  }
+  const result = job.result || {}, summary = result.summary || {}, artifacts = job.artifacts || [];
+  const artifact = name => artifacts.find(item => item.name === name);
+  const report = artifact("sample_similarity_report.html"), archive = artifact("GPA_Accelerator_sample_similarity.zip");
+  const ibsPlot = artifact("integrated_ibs_heatmap.svg"), kingPlot = artifact("king_robust_heatmap.svg"), scatter = artifact("king_ibs0_scatter.svg");
+  const metric = (value, digits = 5) => value == null || !Number.isFinite(Number(value)) ? "—" : Number(value).toFixed(digits);
+  const rows = (result.preview || []).slice(0, 50).map(row => `<tr><td>${escapeHtml(row.sample_1)}</td><td>${escapeHtml(row.sample_2)}</td><td>${escapeHtml(row.marker_types || "外部 .kin0")}</td><td>${metric(row.ibs_similarity)}</td><td>${metric(row.ibs0_rate)}</td><td>${metric(row.pi_hat)}</td><td>${metric(row.king_kinship)}</td><td>${escapeHtml(row.king_evidence || "—")}</td><td>${escapeHtml(row.relationship_hint || "—")}</td></tr>`).join("");
+  const links = artifacts.map(item => { const view = item.name.endsWith(".html") || item.name.endsWith(".svg"); return `<a class="artifact-link"${view ? ' target="_blank" rel="noopener"' : ""} href="${escapeHtml(view ? item.view_url : item.url)}">${escapeHtml(item.name)} <small>${formatBytes(item.size)}</small></a>`; }).join("");
+  target.className = "result-body";
+  target.innerHTML = `
+    <div class="readiness-banner ready"><b>样本相似性与亲缘证据已整合</b><span>各标记类型保留独立结果，同时提供跨 SNP / INDEL / SV 的综合样本对结果。任何材料都不会被自动删除。</span></div>
+    <div class="quality-summary"><div class="meta-card"><span>样本</span><strong>${formatNumber(summary.samples)}</strong></div><div class="meta-card"><span>样本对</span><strong>${formatNumber(summary.pairs)}</strong></div><div class="meta-card"><span>VCF类型</span><strong>${formatNumber(summary.marker_sources)}</strong></div><div class="meta-card"><span>含IBS结果</span><strong>${formatNumber(summary.pairs_with_ibs)}</strong></div><div class="meta-card"><span>含KING结果</span><strong>${formatNumber(summary.pairs_with_king)}</strong></div><div class="meta-card"><span>优先复核候选</span><strong>${formatNumber(summary.duplicate_candidates)}</strong></div></div>
+    <div class="handoff-bar"><strong>报告与矩阵</strong>${report ? `<a class="artifact-link" target="_blank" rel="noopener" href="${escapeHtml(report.view_url)}">打开交互报告</a>` : ""}${archive ? `<a class="artifact-link" href="${escapeHtml(archive.url)}">下载完整ZIP</a>` : ""}</div>
+    ${ibsPlot ? `<section class="quality-section"><h4>综合 IBS 相似性热图</h4><div class="phenotype-chart-preview"><img src="${escapeHtml(ibsPlot.view_url)}" alt="IBS相似性热图"></div></section>` : ""}
+    ${kingPlot ? `<section class="quality-section"><h4>KING-robust 亲缘系数热图</h4><div class="phenotype-chart-preview"><img src="${escapeHtml(kingPlot.view_url)}" alt="KING亲缘热图"></div></section>` : ""}
+    ${scatter ? `<section class="quality-section"><h4>KING-robust × IBS0 关系图</h4><div class="phenotype-chart-preview"><img src="${escapeHtml(scatter.view_url)}" alt="KING和IBS0关系图"></div></section>` : ""}
+    <section class="quality-section"><h4>综合样本对预览（前50）</h4><div class="table-wrap"><table><thead><tr><th>样本1</th><th>样本2</th><th>标记类型</th><th>IBS相似性</th><th>IBS0</th><th>PI_HAT</th><th>KING</th><th>KING来源</th><th>参考提示</th></tr></thead><tbody>${rows}</tbody></table></div></section>
+    <section class="quality-section"><h4>解释边界</h4><div class="readiness-banner caution"><b>植物材料不能机械套用人类亲缘等级</b><span>KING常用0.354、0.177、0.0884、0.0442区间仅作为相对相似性和异常样本复核线；棉花等自交、多倍体材料还需结合PCA、育种谱系和批次解释。</span></div></section>
+    <section class="quality-section"><h4>全部结果文件</h4><div class="artifact-list">${links}</div></section>`;
+}
+
+async function pollSimilarity(runId) {
+  clearTimeout(state.similarityPoll);
+  try {
+    const job = await api("/api/similarity/status", {run_id: runId});
+    renderSimilarityJob(job);
+    if (!["complete", "failed", "cancelled"].includes(job.status)) state.similarityPoll = setTimeout(() => pollSimilarity(runId), 1200);
+    else toast(job.status === "complete" ? "样本相似性与亲缘报告已生成" : (job.error || job.message), job.status !== "complete");
+  } catch (error) { $("similarityRunBtn").disabled = false; toast(error.message, true); }
+}
+
+async function runSimilarityAnalysis() {
+  const sources = {snp: $("similaritySnpPath").value.trim(), indel: $("similarityIndelPath").value.trim(), sv: $("similaritySvPath").value.trim()};
+  const kin0Path = $("similarityKin0Path").value.trim();
+  if (!Object.values(sources).some(Boolean) && !kin0Path) return toast("请至少选择一种VCF，或输入一个KING .kin0文件", true);
+  const button = $("similarityRunBtn"); button.disabled = true; button.textContent = "正在创建任务…";
+  try {
+    const job = await api("/api/similarity/start", {
+      sources, kin0_path: kin0Path, output_dir: $("similarityOutputDir").value.trim(),
+      options: {chromosome_count: phenotypeNumber("similarityChromosomes", 26), site_missing: phenotypeNumber("similarityMissing", .10), maf: phenotypeNumber("similarityMaf", .01), nearest_neighbors: phenotypeNumber("similarityNeighbors", 10), ld_prune: $("similarityLdPrune").checked, prune_window: phenotypeNumber("similarityPruneWindow", 50), prune_step: phenotypeNumber("similarityPruneStep", 5), prune_r2: phenotypeNumber("similarityPruneR2", .20)},
+    });
+    renderSimilarityJob(job); pollSimilarity(job.id); toast("样本相似性后台任务已启动");
+  } catch (error) { button.disabled = false; button.textContent = "开始计算"; $("similarityResult").className = "result-body empty-state"; $("similarityResult").textContent = error.message; toast(error.message, true); }
+}
+
+async function cancelSimilarityAnalysis() {
+  if (!state.similarityJob?.id) return;
+  try { renderSimilarityJob(await api("/api/similarity/cancel", {run_id: state.similarityJob.id})); }
+  catch (error) { toast(error.message, true); }
+}
+
 function initEvents() {
   $("selectFileBtn").addEventListener("click", selectLocalFile);
   $("shutdownBtn").addEventListener("click", shutdownLocal);
@@ -1444,6 +1517,8 @@ function initEvents() {
   $("variantPhenotypeRunBtn").addEventListener("click", runVariantPhenotypeAnalysis);
   $("emmaxRunBtn").addEventListener("click", runEmmaxAnalysis);
   $("emmaxCancelBtn").addEventListener("click", cancelEmmaxAnalysis);
+  $("similarityRunBtn").addEventListener("click", runSimilarityAnalysis);
+  $("similarityCancelBtn").addEventListener("click", cancelSimilarityAnalysis);
   $("qualityRunBtn").addEventListener("click", runQualityAssessment);
   $("qualityCancelBtn").addEventListener("click", cancelQualityAssessment);
   $("qualityCrop").addEventListener("change", applyCropPreset);

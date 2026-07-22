@@ -108,6 +108,7 @@
         <button class="tab" data-tab="sample-lead" role="tab">样本 Lead-SNP 画像</button>
         <button class="tab" data-tab="phenotype-qc" role="tab">表型质控与统计</button>
         <button class="tab" data-tab="variant-phenotype" role="tab">位点 × 表型</button>
+        <button class="tab" data-tab="similarity" role="tab">样本相似性与亲缘</button>
         <button class="tab" data-tab="quality" role="tab">VCF 质量评估</button>
       </div>
 
@@ -170,6 +171,7 @@
             <summary>本地注释与软件资源</summary>
             <div class="tool-manager" id="toolManager">
               <div class="tool-card"><div><b>PLINK 1.9</b><small id="plinkStatus">正在检测…</small></div><button class="secondary install-tool" data-tool="plink">一键安装</button></div>
+              <div class="tool-card"><div><b>PLINK 2</b><small id="plink2Status">正在检测…</small></div><button class="secondary install-tool" data-tool="plink2">一键安装</button></div>
               <div class="tool-card"><div><b>LDBlockShow</b><small id="ldblockshowStatus">正在检测…</small></div><button class="secondary install-tool" data-tool="ldblockshow">一键安装</button></div>
               <div class="tool-card"><div><b>bcftools</b><small id="bcftoolsStatus">正在检测…</small></div><button class="secondary install-tool" data-tool="bcftools">一键安装</button></div>
               <p class="sub" id="toolRoot"></p>
@@ -246,6 +248,16 @@
               <label class="field"><span>时间趋势报警</span><div class="unit-input"><input id="phenotypeTrendSd" type="number" min="0.01" step="0.05" value="0.25"><span>SD/年</span></div></label>
               <label class="field span-2"><span>自定义生物学范围（可选）</span><textarea id="phenotypeCustomThresholds" rows="4" placeholder="PH,60,200,80,100&#10;MY_TRAIT,0,10"></textarea><small>格式：性状,单株下限,单株上限,群体均值下限,群体均值上限。三列时只设置单株范围。</small></label>
             </div>
+          </section>
+
+          <section class="quality-config-card">
+            <h4>广义遗传力</h4>
+            <label class="check-option"><input id="phenotypeHeritability" type="checkbox" checked><span><b>计算表型遗传力</b><small>自动区分单次观测、环境内材料均值与多年多点材料均值；缺少真实重复时不强行拆分残差和G×E</small></span></label>
+            <div class="threshold-grid">
+              <label class="field"><span>建议最少材料数</span><input id="phenotypeHeritabilityMinGenotypes" type="number" min="2" step="1" value="5"><small>低于该数量仍可试算，但标记为低置信度。</small></label>
+              <label class="field"><span>建议最少有效重复</span><input id="phenotypeHeritabilityMinReplicates" type="number" min="1" step="0.5" value="2"><small>按材料×环境单元重复数的调和均值判断。</small></label>
+            </div>
+            <div class="notice">计算的是当前材料和环境下的广义遗传力 H²，不是基于标记关系矩阵的狭义/基因组遗传力。不平衡设计会明确标记为调和均值近似。</div>
           </section>
 
           <section class="quality-config-card">
@@ -330,6 +342,42 @@
           </section>
         </div>
         <div id="variantPhenotypeResult" class="result-body empty-state">尚未运行位点 × 表型关联分析。</div>
+      </div>
+
+      <div class="tab-pane" id="pane-similarity">
+        <div class="pane-intro">
+          <div><h3>样本相似性、IBS与KING-robust证据整合</h3><p>可单独分析SNP、INDEL或SV，也可组合两到三类VCF；还能导入PLINK 2/KING的 .kin0 亲缘表。</p></div>
+          <div class="button-row"><button class="secondary hidden" id="similarityCancelBtn">取消</button><button class="primary" id="similarityRunBtn">开始计算</button></div>
+        </div>
+        <div class="quality-layout">
+          <section class="quality-config-card">
+            <h4>基因型与外部亲缘证据</h4>
+            <div class="advanced-grid">
+              <label class="field span-2"><span>SNP VCF / VCF.GZ（可选）</span><div class="resource-input"><input id="similaritySnpPath" type="text" placeholder="SNP文件"><button class="secondary browse-resource" data-target="similaritySnpPath" data-kind="vcf">选择…</button></div></label>
+              <label class="field span-2"><span>INDEL VCF / VCF.GZ（可选）</span><div class="resource-input"><input id="similarityIndelPath" type="text" placeholder="INDEL文件"><button class="secondary browse-resource" data-target="similarityIndelPath" data-kind="vcf">选择…</button></div></label>
+              <label class="field span-2"><span>SV VCF / VCF.GZ（可选）</span><div class="resource-input"><input id="similaritySvPath" type="text" placeholder="SV文件"><button class="secondary browse-resource" data-target="similaritySvPath" data-kind="vcf">选择…</button></div></label>
+              <label class="field span-2"><span>KING / PLINK 2 .kin0（可选）</span><div class="resource-input"><input id="similarityKin0Path" type="text" placeholder="例如 Cotton.kingtable.kin0"><button class="secondary browse-resource" data-target="similarityKin0Path" data-kind="kin0">选择…</button></div><small>自动识别IID1/ID1、NSNP、HETHET、IBS0和KINSHIP；外部KING系数作为综合KING主证据。</small></label>
+              <label class="field span-2"><span>报告输出目录</span><div class="resource-input"><input id="similarityOutputDir" type="text" placeholder="留空使用本地默认目录"><button class="secondary browse-resource" data-target="similarityOutputDir" data-kind="output_dir">选择…</button></div></label>
+            </div>
+          </section>
+          <section class="quality-config-card">
+            <h4>计算参数</h4>
+            <div class="threshold-grid">
+              <label class="field"><span>常染色体数</span><input id="similarityChromosomes" type="number" min="1" max="200" step="1" value="26"><small>陆地棉/海岛棉默认26；请按物种修改。</small></label>
+              <label class="field"><span>位点缺失上限</span><input id="similarityMissing" type="number" min="0" max="1" step="0.01" value="0.10"></label>
+              <label class="field"><span>最低MAF</span><input id="similarityMaf" type="number" min="0" max="0.5" step="0.001" value="0.01"></label>
+              <label class="field"><span>最近邻数量</span><input id="similarityNeighbors" type="number" min="1" max="50" step="1" value="10"></label>
+            </div>
+            <label class="check-option"><input id="similarityLdPrune" type="checkbox" checked><span><b>按类型分别进行LD剪枝</b><small>默认50位点窗口、步长5、r² 0.20，避免高LD区域在IBS/亲缘结果中过度加权。</small></span></label>
+            <div class="threshold-grid">
+              <label class="field"><span>剪枝窗口</span><input id="similarityPruneWindow" type="number" min="2" step="1" value="50"></label>
+              <label class="field"><span>剪枝步长</span><input id="similarityPruneStep" type="number" min="1" step="1" value="5"></label>
+              <label class="field"><span>剪枝r²</span><input id="similarityPruneR2" type="number" min="0" max="1" step="0.01" value="0.20"></label>
+            </div>
+            <div class="notice">PLINK 1.9计算IBS/PI_HAT；PLINK 2计算KING-robust。常用KING阈值源自人类二倍体，对棉花、自交系和多倍体只作相对复核线，不自动删除材料。</div>
+          </section>
+        </div>
+        <div id="similarityResult" class="result-body empty-state">尚未运行样本相似性分析。</div>
       </div>
 
       <div class="tab-pane" id="pane-quality">
