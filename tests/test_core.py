@@ -35,7 +35,18 @@ class CoreTests(unittest.TestCase):
     def test_crop_presets_are_editable_and_traceable(self):
         crops = crop_catalog()
         crop_ids = {item["id"] for item in crops}
-        self.assertTrue({"rice", "wheat", "cotton", "soybean", "maize", "arabidopsis", "tomato", "potato", "tobacco"}.issubset(crop_ids))
+        self.assertTrue({
+            "rice", "wheat", "wheat_durum", "wheat_wild_emmer", "wheat_einkorn",
+            "cotton", "cotton_barbadense", "cotton_herbaceum",
+            "soybean", "maize", "arabidopsis", "tomato", "potato", "tobacco",
+        }.issubset(crop_ids))
+        by_id = {item["id"]: item for item in crops}
+        self.assertEqual((by_id["wheat"]["ploidy"], by_id["wheat"]["subgenomes"]), (6, 3))
+        self.assertEqual((by_id["wheat_durum"]["ploidy"], by_id["wheat_durum"]["subgenomes"]), (4, 2))
+        self.assertEqual((by_id["wheat_einkorn"]["ploidy"], by_id["wheat_einkorn"]["subgenomes"]), (2, 1))
+        self.assertEqual(by_id["cotton_herbaceum"]["scientific_name"], "Gossypium herbaceum")
+        self.assertEqual((by_id["cotton"]["ploidy"], by_id["cotton_barbadense"]["ploidy"]), (4, 4))
+        self.assertEqual(by_id["cotton_herbaceum"]["ploidy"], 2)
         rice = resolve_profile({"crop_id": "rice", "profile_id": "plant_inbred"})
         self.assertEqual(rice["analysis_scope"], "plant_crop_preset")
         self.assertEqual(rice["thresholds"]["median_dp_min_warn"], 10)
@@ -53,6 +64,10 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(edited["field_sources"]["species_name"], "用户自定义（基于水稻）")
         maize = resolve_profile({"crop_id": "maize", "profile_id": "generic_diploid_plant"})
         self.assertIsNone(maize["thresholds"]["het_rate_warn"])
+        grass_cotton = resolve_profile({"crop_id": "cotton_herbaceum", "profile_id": "plant_inbred"})
+        self.assertEqual(grass_cotton["species_name"], "草棉（二倍体）（Gossypium herbaceum）")
+        self.assertEqual(grass_cotton["analysis_scope"], "plant_crop_preset")
+        self.assertEqual(grass_cotton["subgenomes"], 1)
         with self.assertRaisesRegex(Exception, "作物预设与Profile不一致"):
             resolve_profile({"crop_id": "wheat", "profile_id": "plant_inbred"})
 
