@@ -19,7 +19,7 @@ import zipfile
 from collections import Counter
 from pathlib import Path
 
-from quality_profiles import profile_catalog, resolve_profile
+from quality_profiles import crop_catalog, profile_catalog, resolve_profile
 from population_analysis import PopulationAnalyzer
 from vcf_service import VCFError, classify_variant, detect_compression, parse_info
 
@@ -223,6 +223,9 @@ def build_qc_recommendation(result):
     broad_types = site.get("broad_variant_types") or {}
     dominant_type = max(broad_types, key=broad_types.get) if broad_types else None
     dominant_fraction = broad_types.get(dominant_type, 0) / max(sum(broad_types.values()), 1)
+    qual_reference = thresholds.get("site_qual_warn")
+    if qual_reference is not None and (metric_summary.get("QUAL") or {}).get("coverage", 0) >= .80:
+        parameters["min_qual"] = float(qual_reference)
     if dominant_fraction >= .90 and (metric_summary.get("QD") or {}).get("coverage", 0) >= .80:
         parameters["min_qd"] = 2.0
     if dominant_type == "SNP" and dominant_fraction >= .90:
@@ -244,6 +247,8 @@ def build_qc_recommendation(result):
         reasons.append("检测到{}占比高且相应质量字段覆盖充分，启用caller-aware位点质量起始线".format(dominant_type))
     else:
         reasons.append("位点质量字段覆盖不足或VCF类型混合，默认不机械套用QD/MQ/FS/SOR阈值")
+    if parameters["min_qual"] is not None:
+        reasons.append("当前作物预设提供QUAL建议起始线且QUAL覆盖率≥80%；该值仍需结合caller和原始过滤流程复核")
     if reference_ready:
         reasons.append("已完成参考FASTA核验，可在存在非最简INDEL时启用标准化")
     else:
@@ -972,6 +977,29 @@ class QualityEvaluator:
         if fake_candidates:
             warnings.append(_warning("warning", "region", metadata["name"], "POLYPLOID_FAKE_HET_WINDOWS", "检测到高深度且AB偏向0.25/0.75的假杂合候选窗口", "{}个1 Mb窗口".format(len(fake_candidates)), "优先检查homeologous错配、collapsed repeats和亚基因组注释"))
 
+        qual_reference = thresholds.get("site_qual_warn")
+        qual_values = metric_values.get("QUAL") or []
+        qual_coverage = metric_available_counts["QUAL"] / sampled_records if sampled_records else 0
+        if qual_reference is not None and qual_coverage >= .80 and qual_values:
+            low_qual_fraction = sum(value < qual_reference for value in qual_values) / len(qual_values)
+            if low_qual_fraction >= .10:
+                warnings.append(_warning(
+                    "warning", "site", metadata["name"], "LOW_QUAL_FRACTION",
+                    "较多位点低于所选作物的QUAL建议起始线",
+                    "抽样中{:.2%}低于QUAL {}（覆盖率{:.2%}）".format(low_qual_fraction, _fmt(qual_reference), qual_coverage),
+                    "QUAL依赖caller；请结合FILTER、QD/MQ/FS/SOR和上游流程复核后再过滤",
+                ))
+        titv_reference = thresholds.get("expected_titv_min")
+        titv_observed = transitions / transversions if transversions else None
+        titv_snp_n = transitions + transversions
+        if titv_reference is not None and titv_observed is not None and titv_snp_n >= 1000 and titv_observed < titv_reference:
+            warnings.append(_warning(
+                "warning", "site", metadata["name"], "TITV_BELOW_CROP_REFERENCE",
+                "Ti/Tv低于所选作物的大规模SNP集经验参考线",
+                "Ti/Tv={:.3f}，参考线={}，抽样双等位SNP={}条".format(titv_observed, _fmt(titv_reference), titv_snp_n),
+                "该指标不适用于SV/INDEL或小位点集；请检查参考版本、变异过滤和测序错误，不要单独据此删位点",
+            ))
+
         het_values = [x["het_rate"] for x in report_samples if x["het_rate"] is not None]
         het_center = _median(het_values)
         het_mad = _mad(het_values, het_center)
@@ -1363,6 +1391,15 @@ def render_report(result):
     threshold_rows = []
     for key, value in profile["thresholds"].items():
         threshold_rows.append("<tr><td>{}</td><td>{}</td><td>{}</td></tr>".format(html.escape(key), html.escape(str(value)), html.escape(profile["threshold_sources"].get(key, ""))))
+    field_labels = {
+        "species_name": "物种", "ploidy": "生物学倍性", "genotype_ploidy": "VCF GT编码倍性",
+        "subgenomes": "亚基因组数量", "mating_system": "繁殖/材料类型",
+    }
+    field_rows = []
+    for key, label in field_labels.items():
+        field_rows.append("<tr><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+            html.escape(label), html.escape(str(profile.get(key, "—"))),
+            html.escape((profile.get("field_sources") or {}).get(key, ""))))
     status_label = {"pass": "通过", "warning": "需关注", "critical": "高风险"}[summary["status"]]
     population = result.get("population_analysis") or {}
     population_rows = []
@@ -1433,7 +1470,7 @@ def render_report(result):
     <nav class='report-nav' aria-label='报告章节'><a href='#section-overview'>总览</a><a href='#section-input'>输入审计</a><a href='#section-site'>位点质量</a><a href='#section-samples'>样本质量</a><a href='#section-population'>群体与亲缘</a><a href='#section-warnings'>告警</a><a href='#section-recommendations'>质控建议</a><a href='#section-downloads'>下载</a></nav>
     <section class='kpis'><div class='kpi'>记录数<b>{records}</b></div><div class='kpi'>样本数<b>{samples}</b></div><div class='kpi'>染色体/Contig<b>{contigs}</b></div><div class='kpi'>严重告警<b>{critical}</b></div><div class='kpi'>一般告警<b>{warning}</b></div></section>
     <section class='card readiness {readiness_code}'><h2>{readiness_title}</h2><p>{readiness_description}</p><div class='priority-list'>{priority_rows}</div><h3>分层评分</h3><div class='dimensions'>{dimension_rows}</div></section>
-    <section class='card' id='section-input'><h2>运行口径与输入审计</h2><p><b>Profile：</b>{profile_name}；<b>物种：</b>{species}；<b>生物学倍性：</b>{ploidy}；<b>VCF GT编码倍性：</b>{gt_ploidy}；<b>亚基因组：</b>{subgenomes}</p><p class='note'>{focus_note}</p><p><b>扫描：</b>{scan_mode}，评估 {evaluated}/{records} 条记录，耗时 {elapsed} 秒。</p><p class='note'>{method_note}</p></section>
+    <section class='card' id='section-input'><h2>运行口径与输入审计</h2><p><b>Profile：</b>{profile_name}；<b>作物预设：</b>{crop_name}；<b>物种：</b>{species}；<b>生物学倍性：</b>{ploidy}；<b>VCF GT编码倍性：</b>{gt_ploidy}；<b>亚基因组：</b>{subgenomes}</p><p><b>建议基因组大小：</b>{genome_size} Mb；<b>参考版本提示：</b>{reference_hint}</p><p class='note'>{focus_note}</p><p><b>扫描：</b>{scan_mode}，评估 {evaluated}/{records} 条记录，耗时 {elapsed} 秒。</p><p class='note'>{method_note}</p></section>
     <div class='grid' id='section-site'><section class='card'><h2>变异类型</h2>{type_chart}</section><section class='card'><h2>位点缺失率分布</h2>{missing_chart}</section></div>
     <div class='grid'><section class='card'><h2>MAF分布</h2>{maf_chart}</section><section class='card'><h2>SV长度分布</h2>{sv_chart}</section></div>
     <section class='card'><h2>位点质量字段分布</h2><p>覆盖率表示抽样位点中该字段存在的比例；缺字段显示为NA，不按0分处理。</p><div class='table'><table><thead><tr><th>字段</th><th>覆盖率</th><th>P05</th><th>中位数</th><th>P95</th><th>最大值</th></tr></thead><tbody>{metric_rows}</tbody></table></div><p>Header质控证据分：<b>{evidence_score}/100</b>；可继续最简化INDEL：{nonminimal}；相邻重复记录：{duplicates}。</p></section>
@@ -1444,7 +1481,7 @@ def render_report(result):
     <section class='card' id='section-warnings'><h2>告警与建议</h2><div class='filterbar'><button onclick="filterWarnings('all')">全部</button><button onclick="filterWarnings('critical')">仅关键</button><button onclick="filterWarnings('warning')">仅提醒</button><button onclick="filterWarnings('info')">仅信息</button></div><div class='table'><table><thead><tr><th>级别</th><th>范围</th><th>对象</th><th>问题</th><th>建议</th></tr></thead><tbody id='warningTableBody'>{warning_rows}</tbody></table></div></section>
     <section class='card' id='section-recommendations'><h2>物种与VCF自适应质控建议</h2><p class='note'>这是保守起始方案，不会自动覆盖原VCF。预计触发位点过滤：{qc_estimated_removal}；高缺失候选样本：{qc_candidate_samples} 个，默认不自动删除。</p><div class='grid'><div class='table'><table><thead><tr><th>参数</th><th>推荐值</th></tr></thead><tbody>{qc_parameter_rows}</tbody></table></div><div><ul>{qc_reason_rows}</ul></div></div></section>
     <section class='card'><h2>样本质量指标</h2><div class='filterbar'><input id='sampleFilter' type='search' placeholder='搜索样本ID' oninput='filterSamples(this.value)'><button onclick="setSampleStatus('all')">全部状态</button><button onclick="setSampleStatus('critical')">关键</button><button onclick="setSampleStatus('warning')">提醒</button></div><div class='table'><table><thead><tr><th>样本</th><th>Group</th><th>Batch</th><th>样本分</th><th>状态</th><th>缺失率</th><th>杂合率</th><th>中位DP</th><th>中位GQ</th><th>AB异常</th><th>相位率</th></tr></thead><tbody id='sampleTableBody'>{sample_rows}</tbody></table></div></section>
-    <section class='card'><h2>有效阈值与来源</h2><div class='table'><table><thead><tr><th>阈值</th><th>有效值</th><th>来源</th></tr></thead><tbody>{threshold_rows}</tbody></table></div></section>
+    <section class='card'><h2>作物字段、有效阈值与来源</h2><p class='note'>作物预设是建议起点，不是锁定规则；“用户自定义（基于某作物）”表示该项已被手动覆盖。</p><div class='grid'><div class='table'><table><thead><tr><th>字段</th><th>有效值</th><th>来源</th></tr></thead><tbody>{field_rows}</tbody></table></div><div class='table'><table><thead><tr><th>阈值</th><th>有效值</th><th>来源</th></tr></thead><tbody>{threshold_rows}</tbody></table></div></div></section>
     {population_section}
     <section class='card'><h2>自动修复安全策略</h2><p>原始VCF永不被静默覆盖。覆盖源文件、改写REF/ALT/GT、坐标转换、染色体批量重命名和删除文件均被定义为危险操作，执行前必须再次确认。</p></section>
     <section class='card' id='section-downloads'><h2>机器可读结果与复核材料</h2><p>下列文件与HTML使用同一数据内核，可直接用于R、Excel或后续脚本。</p><div class='download-grid'>{download_links}</div></section>
@@ -1456,10 +1493,13 @@ def render_report(result):
         "critical": summary["critical_count"], "warning": summary["warning_count"], "profile_name": html.escape(profile["name"]),
         "species": html.escape(profile.get("species_name") or profile["kingdom"]), "ploidy": profile["ploidy"],
         "gt_ploidy": profile.get("effective_gt_ploidy") or "未识别", "subgenomes": profile["subgenomes"],
+        "crop_name": html.escape(profile.get("crop_name") or "未选择（手动/Profile模式）"),
+        "genome_size": html.escape(str(profile.get("genome_size_mb") or "—")),
+        "reference_hint": html.escape(profile.get("reference_hint") or "未由作物预设提供"),
         "focus_note": html.escape(
             "非植物自定义模式：全部核心阈值由使用者提供并负责解释；CallVCF不提供动物默认参数。"
             if profile.get("analysis_scope") == "non_plant_custom"
-            else "植物分析模式：使用内置植物Profile，并记录全部用户覆盖参数及来源。"
+            else ((profile.get("preset_disclaimer") or "") + " 所有作物参数均可在运行前自由修改，报告记录最终有效值与来源。" if profile.get("crop_id") else "植物分析模式：使用内置植物Profile，并记录全部用户覆盖参数及来源。")
         ),
         "scan_mode": "完整扫描" if scan["mode"] == "full" else "智能抽样", "evaluated": "{:,}".format(scan["evaluated_records"]),
         "elapsed": scan["elapsed_seconds"], "method_note": html.escape(scan["method_note"]),
@@ -1486,7 +1526,7 @@ def render_report(result):
         "qc_estimated_removal": _ratio(qc_recommendation.get("estimated_site_removal_fraction")),
         "qc_candidate_samples": len(qc_recommendation.get("sample_exclusion_candidates") or []),
         "qc_parameter_rows": "".join(qc_parameter_rows) or "<tr><td colspan='2'>无可用参数</td></tr>", "qc_reason_rows": qc_reason_rows,
-        "threshold_rows": "".join(threshold_rows), "population_section": population_section, "embedded": embedded,
+        "field_rows": "".join(field_rows), "threshold_rows": "".join(threshold_rows), "population_section": population_section, "embedded": embedded,
         "readiness_code": html.escape(readiness.get("code") or "caution"), "readiness_title": html.escape(readiness.get("title") or "需要复核"),
         "readiness_description": html.escape(readiness.get("description") or ""), "priority_rows": priority_rows, "dimension_rows": dimension_rows,
         "download_links": download_links,
@@ -1512,6 +1552,7 @@ class QualityJobManager:
     def catalog(self):
         return {
             "profiles": profile_catalog(),
+            "crops": crop_catalog(),
             "default_report_root": str(self.default_report_root()),
             "analysis_focus": "plant",
             "non_plant_mode": "custom_parameters_only",

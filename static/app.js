@@ -1,4 +1,4 @@
-const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null, qualityCatalog: null, qualityRun: null, qualityPoll: null, qcRecommendation: null, repairCatalog: null, repairPlan: null, repairPoll: null, repairCompleted: false };
+const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null, qualityCatalog: null, qualityRun: null, qualityPoll: null, qcRecommendation: null, repairCatalog: null, repairPlan: null, repairPoll: null, repairCompleted: false, applyingCropPreset: false };
 const $ = (id) => document.getElementById(id);
 const categoryOrder = ["HOM_REF", "HET", "HOM_ALT", "MISSING", "OTHER"];
 const shortLabels = { HOM_REF: "0/0", HET: "0/1", HOM_ALT: "1/1", MISSING: "缺失", OTHER: "其他" };
@@ -710,9 +710,16 @@ async function loadQualityCatalog() {
     state.qualityCatalog = payload.data;
     const select = $("qualityProfile");
     select.innerHTML = payload.data.profiles.map(x => `<option value="${escapeHtml(x.id)}">${escapeHtml(x.name)}</option>`).join("");
+    const cropSelect = $("qualityCrop");
+    cropSelect.innerHTML = `<option value="">不使用作物预设 / 手动设置</option>${(payload.data.crops || []).map(x => `<option value="${escapeHtml(x.id)}">${escapeHtml(x.name)} · ${escapeHtml(x.scientific_name)}</option>`).join("")}`;
     const saved = localStorage.getItem("callvcfQualityProfile");
     select.value = payload.data.profiles.some(x => x.id === saved) ? saved : "cotton_inbred";
     applyQualityProfile();
+    const savedCrop = localStorage.getItem("callvcfQualityCrop");
+    if ((payload.data.crops || []).some(x => x.id === savedCrop)) {
+      cropSelect.value = savedCrop;
+      applyCropPreset();
+    }
     $("qualityOutputDir").placeholder = `默认：${payload.data.default_report_root}`;
   } catch (error) {
     toast(error.message, true);
@@ -720,6 +727,12 @@ async function loadQualityCatalog() {
 }
 
 function applyQualityProfile() {
+  if (!state.applyingCropPreset && $("qualityCrop").value) {
+    $("qualityCrop").value = "";
+    localStorage.removeItem("callvcfQualityCrop");
+    document.querySelectorAll("[data-qc-threshold]").forEach(input => { input.value = ""; });
+    $("cropPresetSummary").textContent = "已改用手动/Profile模式；原作物预设阈值已清空。";
+  }
   const profile = (state.qualityCatalog?.profiles || []).find(x => x.id === $("qualityProfile").value);
   if (!profile) return;
   $("qualityProfileNote").textContent = profile.notes || "";
@@ -736,6 +749,62 @@ function applyQualityProfile() {
   state.repairCompleted = false;
   updateSpeciesFocus();
   updateWorkflow();
+}
+
+function selectedCropPreset() {
+  return (state.qualityCatalog?.crops || []).find(x => x.id === $("qualityCrop").value);
+}
+
+function applyCropPreset() {
+  const crop = selectedCropPreset();
+  if (!crop) {
+    localStorage.removeItem("callvcfQualityCrop");
+    $("cropPresetSummary").textContent = "未使用作物预设；当前字段保留，可作为手动参数继续修改。";
+    updateSpeciesFocus();
+    return;
+  }
+  state.applyingCropPreset = true;
+  $("qualityProfile").value = crop.profile_id;
+  applyQualityProfile();
+  $("qualitySpecies").value = `${crop.name}（${crop.scientific_name}）`;
+  $("qualityKingdom").value = "plant";
+  $("qualityPloidy").value = crop.ploidy;
+  $("qualityGenotypePloidy").value = String(crop.genotype_ploidy || "auto");
+  $("qualitySubgenomes").value = crop.subgenomes;
+  $("qualityMating").value = crop.mating_system;
+  document.querySelectorAll("[data-qc-threshold]").forEach(input => {
+    const value = crop.thresholds?.[input.dataset.qcThreshold];
+    input.value = value == null ? "" : String(value);
+  });
+  $("populationSiteMissing").value = crop.thresholds?.site_missing_warn ?? 0.10;
+  state.applyingCropPreset = false;
+  localStorage.setItem("callvcfQualityCrop", crop.id);
+  localStorage.setItem("callvcfQualityProfile", crop.profile_id);
+  updateCropPresetSummary();
+  updateSpeciesFocus();
+  state.qualityRun = null;
+  state.qcRecommendation = null;
+  state.repairCompleted = false;
+  updateWorkflow();
+  toast(`已载入${crop.name}建议起始参数，所有字段均可继续修改`);
+}
+
+function updateCropPresetSummary() {
+  const crop = selectedCropPreset();
+  if (!crop) return;
+  let changed = 0;
+  const expectedSpecies = `${crop.name}（${crop.scientific_name}）`;
+  if ($("qualitySpecies").value.trim() !== expectedSpecies) changed++;
+  if (Number($("qualityPloidy").value) !== Number(crop.ploidy)) changed++;
+  if ($("qualityGenotypePloidy").value !== String(crop.genotype_ploidy || "auto")) changed++;
+  if (Number($("qualitySubgenomes").value) !== Number(crop.subgenomes)) changed++;
+  if ($("qualityMating").value !== crop.mating_system) changed++;
+  document.querySelectorAll("[data-qc-threshold]").forEach(input => {
+    const expected = crop.thresholds?.[input.dataset.qcThreshold];
+    const actual = input.value.trim() === "" ? null : Number(input.value);
+    if (!((expected == null && actual == null) || (expected != null && Number(expected) === actual))) changed++;
+  });
+  $("cropPresetSummary").innerHTML = `<b>${escapeHtml(crop.name)} · ${escapeHtml(crop.scientific_name)}</b><br>建议基因组大小约 ${escapeHtml(crop.genome_size_mb)} Mb；参考版本提示：${escapeHtml(crop.reference_hint)}。<br>${escapeHtml(crop.notes)}${changed ? `<br><b>已手动修改 ${changed} 项；报告会标记为用户覆盖。</b>` : "<br>当前仍为完整预设值。"}`;
 }
 
 function animalCustomConfiguration() {
@@ -853,6 +922,7 @@ function qualityPayload() {
   const thresholds = {};
   document.querySelectorAll("[data-qc-threshold]").forEach(input => {
     if (input.value.trim() !== "") thresholds[input.dataset.qcThreshold] = input.value;
+    else if ($("qualityCrop").value) thresholds[input.dataset.qcThreshold] = null;
   });
   const focusConfig = validateSpeciesFocus();
   return {
@@ -874,6 +944,7 @@ function qualityPayload() {
       ld_window_kb: Number($("populationLdWindow").value || 1000),
     },
     profile: {
+      crop_id: $("qualityCrop").value,
       profile_id: $("qualityProfile").value,
       species_name: $("qualitySpecies").value.trim(),
       kingdom: $("qualityKingdom").value,
@@ -1187,10 +1258,11 @@ function initEvents() {
   $("sampleLeadRunBtn").addEventListener("click", runSampleLeadProfile);
   $("qualityRunBtn").addEventListener("click", runQualityAssessment);
   $("qualityCancelBtn").addEventListener("click", cancelQualityAssessment);
+  $("qualityCrop").addEventListener("change", applyCropPreset);
   $("qualityProfile").addEventListener("change", applyQualityProfile);
   $("qualityKingdom").addEventListener("change", () => { $("animalParametersConfirmed").checked = false; updateSpeciesFocus(); });
-  ["qualitySpecies", "qualityGenotypePloidy", "qualityMating"].forEach(id => $(id).addEventListener("input", updateSpeciesFocus));
-  document.querySelectorAll("[data-qc-threshold]").forEach(input => input.addEventListener("input", updateSpeciesFocus));
+  ["qualitySpecies", "qualityPloidy", "qualityGenotypePloidy", "qualitySubgenomes", "qualityMating"].forEach(id => $(id).addEventListener("input", () => { updateSpeciesFocus(); updateCropPresetSummary(); }));
+  document.querySelectorAll("[data-qc-threshold]").forEach(input => input.addEventListener("input", () => { updateSpeciesFocus(); updateCropPresetSummary(); }));
   $("animalParametersConfirmed").addEventListener("change", updateSpeciesFocus);
   $("showRepairPolicyBtn").addEventListener("click", () => showDangerRepairPolicy());
   $("repairAction").addEventListener("change", updateRepairFields);

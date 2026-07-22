@@ -213,6 +213,8 @@
           <section class="quality-config-card">
             <h4>植物物种、基因组与解释 Profile</h4>
             <div class="advanced-grid">
+              <label class="field span-2"><span>常见作物预设（可选）</span><select id="qualityCrop"><option value="">不使用作物预设 / 手动设置</option></select><small>选择后会自动填入建议起始参数；下方所有字段和阈值仍可自由修改。</small></label>
+              <div class="notice span-2" id="cropPresetSummary">尚未选择作物预设。你仍可直接选择通用植物 Profile 并手动设置。</div>
               <label class="field span-2"><span>推荐 Profile</span><select id="qualityProfile"></select><small id="qualityProfileNote"></small></label>
               <label class="field"><span>物种名称</span><input id="qualitySpecies" type="text" placeholder="例如：陆地棉、玉米、水稻"></label>
               <label class="field"><span>生物类别</span><select id="qualityKingdom"><option value="plant">植物</option><option value="animal">动物（仅自定义）</option><option value="fungus">真菌（仅自定义）</option><option value="microbe">微生物（仅自定义）</option><option value="other">其他（仅自定义）</option></select><small>内置Profile锁定为植物；非植物必须选择自定义。</small></label>
@@ -234,8 +236,8 @@
             </div>
           </section>
           <details class="quality-config-card" id="qualityThresholdDetails" open>
-            <summary>自定义质量阈值（留空则使用 Profile）</summary>
-            <p class="sub">比例统一填写0–1。报告会同时记录Profile默认值、用户覆盖值和最终生效来源。</p>
+            <summary>查看或自定义质量阈值</summary>
+            <p class="sub">比例统一填写0–1。使用作物预设时会显示全部有效值；清空某项表示明确关闭该项。未选择作物时，留空才表示沿用Profile。</p>
             <div class="threshold-grid">
               <label class="field"><span>样本缺失 Warning</span><input data-qc-threshold="sample_missing_warn" type="number" min="0" max="1" step="0.001" placeholder="Profile"></label>
               <label class="field"><span>样本缺失 Critical</span><input data-qc-threshold="sample_missing_critical" type="number" min="0" max="1" step="0.001" placeholder="Profile"></label>
@@ -251,6 +253,8 @@
               <label class="field"><span>AB上限</span><input data-qc-threshold="ab_upper" type="number" min="0" max="1" step="0.01" placeholder="Profile"></label>
               <label class="field"><span>结构分析MAF</span><input data-qc-threshold="maf_structure" type="number" min="0" max="1" step="0.01" placeholder="Profile"></label>
               <label class="field"><span>HWE P阈值</span><input data-qc-threshold="hwe_p_warn" type="number" min="0" max="1" step="any" placeholder="Profile/不适用"></label>
+              <label class="field"><span>位点QUAL建议线</span><input data-qc-threshold="site_qual_warn" type="number" min="0" step="1" placeholder="关闭/描述性"><small>仅在QUAL覆盖充分时进入建议方案。</small></label>
+              <label class="field"><span>Ti/Tv经验参考下限</span><input data-qc-threshold="expected_titv_min" type="number" min="0" step="0.01" placeholder="关闭/描述性"><small>只用于足量双等位SNP，不作为机械删点规则。</small></label>
             </div>
           </details>
           <section class="quality-config-card">

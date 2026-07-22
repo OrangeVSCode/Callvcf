@@ -14,7 +14,7 @@ from vcf_service import PurePythonVCFService
 from advanced_analysis import AdvancedAnalyzer, genotype_dosage, pairwise_r2, pairwise_dprime, parse_region, parse_trait_directions
 from tool_manager import tools_status
 from quality_engine import QualityEvaluator, QualityJobManager, render_report, _svg_ld_decay, _svg_sample_qc, build_analysis_readiness
-from quality_profiles import profile_catalog, resolve_profile
+from quality_profiles import crop_catalog, profile_catalog, resolve_profile
 from population_analysis import PopulationAnalyzer
 from repair_engine import RepairExecutor, _quality_comparison
 
@@ -32,6 +32,30 @@ def bgzf_block(data):
 
 
 class CoreTests(unittest.TestCase):
+    def test_crop_presets_are_editable_and_traceable(self):
+        crops = crop_catalog()
+        crop_ids = {item["id"] for item in crops}
+        self.assertTrue({"rice", "wheat", "cotton", "soybean", "maize", "arabidopsis", "tomato", "potato", "tobacco"}.issubset(crop_ids))
+        rice = resolve_profile({"crop_id": "rice", "profile_id": "plant_inbred"})
+        self.assertEqual(rice["analysis_scope"], "plant_crop_preset")
+        self.assertEqual(rice["thresholds"]["median_dp_min_warn"], 10)
+        self.assertEqual(rice["thresholds"]["expected_titv_min"], 2.3)
+        self.assertEqual(rice["threshold_sources"]["median_dp_min_warn"], "作物预设：水稻")
+        edited = resolve_profile({
+            "crop_id": "rice", "profile_id": "plant_inbred",
+            "species_name": "本地水稻群体", "thresholds": {"median_dp_min_warn": 8, "site_missing_warn": .10, "expected_titv_min": None},
+        })
+        self.assertEqual(edited["thresholds"]["median_dp_min_warn"], 8)
+        self.assertEqual(edited["threshold_sources"]["median_dp_min_warn"], "用户自定义（基于水稻）")
+        self.assertEqual(edited["threshold_sources"]["site_missing_warn"], "作物预设：水稻")
+        self.assertIsNone(edited["thresholds"]["expected_titv_min"])
+        self.assertEqual(edited["threshold_sources"]["expected_titv_min"], "用户自定义（基于水稻）")
+        self.assertEqual(edited["field_sources"]["species_name"], "用户自定义（基于水稻）")
+        maize = resolve_profile({"crop_id": "maize", "profile_id": "generic_diploid_plant"})
+        self.assertIsNone(maize["thresholds"]["het_rate_warn"])
+        with self.assertRaisesRegex(Exception, "作物预设与Profile不一致"):
+            resolve_profile({"crop_id": "wheat", "profile_id": "plant_inbred"})
+
     def test_quality_profiles_are_plant_focused_and_animal_requires_explicit_custom_parameters(self):
         catalog = profile_catalog()
         self.assertFalse(any(x["id"] == "generic_diploid_animal" for x in catalog))

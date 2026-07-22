@@ -25,7 +25,7 @@ def main():
         started = time.time()
         evaluator = QualityEvaluator(PurePythonVCFService())
         result = evaluator.evaluate(path, {
-            "profile": {"profile_id": "cotton_inbred", "species_name": "陆地棉"},
+            "profile": {"crop_id": "cotton", "profile_id": "cotton_inbred"},
             "scan_mode": "smart",
             "target_records": args.target_records,
         })
