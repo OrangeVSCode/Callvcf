@@ -3,6 +3,7 @@ import argparse
 import json
 import threading
 import webbrowser
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 import app as app_module
@@ -17,13 +18,25 @@ from repair_engine import RepairExecutor
 from vcf_service import create_service
 
 
-def existing_callvcf(port):
+def existing_service_status(port):
+    """Return ``gpa``, ``other`` or ``free`` for the requested local port.
+
+    Windows may allow two Python HTTP servers to share a port.  Detecting a
+    legacy CallVCF/VCF Explorer service before binding prevents the new app
+    from intermittently serving the old interface on the same address.
+    """
     try:
         with urlopen("http://127.0.0.1:{}/api/health".format(port), timeout=1) as response:
             data = json.loads(response.read().decode("utf-8"))
-        return bool(data.get("ok") and data.get("service") == "GPA-Accelerator")
+        if data.get("ok") and data.get("service") == "GPA-Accelerator":
+            return "gpa"
+        return "other"
+    except HTTPError:
+        return "other"
+    except URLError:
+        return "free"
     except Exception:
-        return False
+        return "other"
 
 
 def main():
@@ -33,7 +46,8 @@ def main():
     parser.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
-    if existing_callvcf(args.port):
+    existing_status = existing_service_status(args.port)
+    if existing_status == "gpa":
         if not args.no_browser:
             webbrowser.open("http://127.0.0.1:{}".format(args.port))
         return
@@ -46,13 +60,16 @@ def main():
     app_module.ASSOCIATION = VariantPhenotypeAnalyzer(app_module.SERVICE)
     app_module.EMMAX = EmmaxJobManager(app_module.SERVICE)
     app_module.SIMILARITY = SimilarityJobManager()
+    preferred_port = 0 if existing_status == "other" else args.port
     try:
-        server = AppServer(("127.0.0.1", args.port), Handler)
+        server = AppServer(("127.0.0.1", preferred_port), Handler)
     except OSError:
         server = AppServer(("127.0.0.1", 0), Handler)
     port = server.server_address[1]
     url = "http://127.0.0.1:{}".format(port)
     print("GPA-Accelerator local interface: {}".format(url), flush=True)
+    if existing_status == "other":
+        print("Legacy local service detected on port {}; using an isolated port.".format(args.port), flush=True)
     print("Backend: {}".format(getattr(app_module.SERVICE, "backend", "unknown")), flush=True)
     if not args.no_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()

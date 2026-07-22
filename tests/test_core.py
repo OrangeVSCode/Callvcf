@@ -7,6 +7,7 @@ import time
 import unittest
 import zlib
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -22,6 +23,7 @@ from phenotype_engine import PhenotypeAnalyzer, phenotype_catalog
 from association_engine import VariantPhenotypeAnalyzer
 from emmax_engine import EmmaxJobManager
 from similarity_engine import SimilarityJobManager, _parse_kin0
+from start_local import existing_service_status
 
 
 def bgzf_block(data):
@@ -37,6 +39,25 @@ def bgzf_block(data):
 
 
 class CoreTests(unittest.TestCase):
+    def test_launcher_distinguishes_current_and_legacy_local_services(self):
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self):
+                return self.payload
+
+        with patch("start_local.urlopen", return_value=Response(b'{"ok":true,"service":"GPA-Accelerator"}')):
+            self.assertEqual(existing_service_status(8765), "gpa")
+        with patch("start_local.urlopen", return_value=Response(b'{"ok":true,"service":"VCF Query Tool"}')):
+            self.assertEqual(existing_service_status(8765), "other")
+
     def test_emmax_managed_pipeline_with_simulated_tools(self):
         class SimulatedEmmax(EmmaxJobManager):
             def _runtime(self):
