@@ -12,7 +12,7 @@ from vcf_service import create_service
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate a persistent CallVCF quality report for manual validation")
+    parser = argparse.ArgumentParser(description="Generate a persistent GPA-Accelerator quality report for manual validation")
     parser.add_argument("--vcf", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--profile", default="cotton_inbred")

@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from vcf_service import VCFError, create_service
 from advanced_analysis import AdvancedAnalyzer
 from quality_engine import QualityJobManager
+from phenotype_engine import PhenotypeAnalyzer
 from repair_engine import RepairExecutor
 from tool_manager import install_tool, tools_status
 
@@ -25,6 +26,7 @@ SERVICE = None
 ADVANCED = None
 QUALITY = None
 REPAIR = None
+PHENOTYPE = None
 
 
 def _windows_dialog(kind="file", initial_dir=None):
@@ -41,6 +43,7 @@ def _windows_dialog(kind="file", initial_dir=None):
         "bed": "BED regions|*.bed;*.bed.gz;*.tsv;*.txt|All files|*.*",
         "domain": "Domain table|*.tsv;*.csv;*.txt;*.gz|All files|*.*",
         "phenotype": "Phenotype PS|*.ps|All files|*.*",
+        "phenotype_data": "Phenotype data|*.xlsx;*.csv;*.tsv;*.txt|Excel workbook|*.xlsx|Delimited table|*.csv;*.tsv;*.txt|All files|*.*",
         "reference": "Reference FASTA|*.fa;*.fasta;*.fna;*.fa.gz;*.fasta.gz|All files|*.*",
         "executable": "Executable|*.exe|All files|*.*",
         "file": "All files|*.*",
@@ -118,6 +121,7 @@ def select_resource(kind="file", initial_dir=None):
                 "bed": [("BED regions", "*.bed *.bed.gz *.tsv *.txt"), ("All files", "*.*")],
                 "domain": [("Domain table", "*.tsv *.csv *.txt *.gz"), ("All files", "*.*")],
                 "phenotype": [("Phenotype PS", "*.ps"), ("All files", "*.*")],
+                "phenotype_data": [("Phenotype data", "*.xlsx *.csv *.tsv *.txt"), ("Excel workbook", "*.xlsx"), ("Delimited table", "*.csv *.tsv *.txt"), ("All files", "*.*")],
                 "executable": [("Executable", "*.exe *"), ("All files", "*.*")],
                 "reference": [("Reference FASTA", "*.fa *.fasta *.fna *.fa.gz *.fasta.gz"), ("All files", "*.*")],
             }
@@ -133,7 +137,7 @@ class AppServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "VCFQueryTool/1.0"
+    server_version = "GPA-Accelerator/1.0"
 
     def log_message(self, fmt, *args):
         sys.stdout.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
@@ -166,7 +170,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/health":
             return self._json(200, {
                 "ok": True,
-                "service": "VCF Query Tool",
+                "service": "GPA-Accelerator",
                 "backend": getattr(SERVICE, "backend", "bcftools"),
                 "bcftools": SERVICE.bcftools,
             })
@@ -174,6 +178,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "data": tools_status()})
         if parsed.path == "/api/quality/catalog":
             return self._json(200, {"ok": True, "data": QUALITY.catalog()})
+        if parsed.path == "/api/phenotype/catalog":
+            return self._json(200, {"ok": True, "data": PHENOTYPE.catalog()})
         if parsed.path == "/api/repair/catalog":
             return self._json(200, {"ok": True, "data": REPAIR.catalog()})
         if parsed.path == "/api/quality/artifact":
@@ -191,6 +197,21 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            except VCFError as exc:
+                return self._json(404, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/phenotype/artifact":
+            try:
+                query = parse_qs(parsed.query)
+                path = PHENOTYPE.artifact((query.get("run_id") or [""])[0], (query.get("name") or [""])[0])
+                body = path.read_bytes()
+                mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+                self.send_response(200)
+                self.send_header("Content-Type", mime + ("; charset=utf-8" if mime.startswith("text/") or mime in {"application/json", "image/svg+xml"} else ""))
+                disposition = "inline" if (query.get("view") or [""])[0] == "1" and path.suffix.lower() in {".html", ".svg"} else "attachment"
+                self.send_header("Content-Disposition", "{}; filename=\"{}\"".format(disposition, path.name))
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers(); self.wfile.write(body); return
             except VCFError as exc:
                 return self._json(404, {"ok": False, "error": str(exc)})
         relative = "index.html" if parsed.path in {"", "/"} else unquote(parsed.path.lstrip("/"))
@@ -218,7 +239,7 @@ class Handler(BaseHTTPRequestHandler):
             elif route == "/api/select-resource":
                 result = select_resource(payload.get("kind", "file"), payload.get("initial_dir"))
             elif route == "/api/shutdown":
-                result = {"message": "CallVCF 正在关闭"}
+                result = {"message": "GPA-Accelerator 正在关闭"}
                 self._json(200, {"ok": True, "data": result})
                 threading.Timer(0.2, self.server.shutdown).start()
                 return
@@ -250,6 +271,8 @@ class Handler(BaseHTTPRequestHandler):
                     REPAIR.refresh_backend()
             elif route == "/api/quality/start":
                 result = QUALITY.start(payload)
+            elif route == "/api/phenotype/analyze":
+                result = PHENOTYPE.analyze(payload)
             elif route == "/api/quality/status":
                 result = QUALITY.status(payload.get("run_id"))
             elif route == "/api/quality/cancel":
@@ -273,19 +296,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Interactive VCF query tool")
+    parser = argparse.ArgumentParser(description="GPA-Accelerator local genomics and phenotype analysis")
     parser.add_argument("--host", default=os.environ.get("VCF_TOOL_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("VCF_TOOL_PORT", "8765")))
     parser.add_argument("--bcftools", default=os.environ.get("BCFTOOLS"))
     args = parser.parse_args()
 
-    global SERVICE, ADVANCED, QUALITY, REPAIR
+    global SERVICE, ADVANCED, QUALITY, REPAIR, PHENOTYPE
     SERVICE = create_service(args.bcftools)
     ADVANCED = AdvancedAnalyzer(SERVICE)
     QUALITY = QualityJobManager(SERVICE)
     REPAIR = RepairExecutor(SERVICE)
+    PHENOTYPE = PhenotypeAnalyzer()
     server = AppServer((args.host, args.port), Handler)
-    print("VCF Query Tool: http://{}:{}".format(args.host, args.port), flush=True)
+    print("GPA-Accelerator: http://{}:{}".format(args.host, args.port), flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -1461,12 +1461,12 @@ def render_report(result):
     for filename, label in (("pairwise_similarity.tsv", "样本对相似度"), ("roh_segments.tsv", "ROH区段"), ("pca_scores.tsv", "PCA坐标"), ("ld_decay.tsv", "LD衰减")):
         if filename in population_artifacts:
             download_names.append((filename, label))
-    download_names.append(("CallVCF_QC_report.zip", "完整报告包"))
+    download_names.append(("GPA_Accelerator_VCF_QC_report.zip", "完整报告包"))
     download_links = "".join("<a href='{}'>{}</a>".format(html.escape(filename), html.escape(label)) for filename, label in download_names)
     embedded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
-    template = """<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>CallVCF质量评估报告</title><style>
+    template = """<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>GPA-Accelerator VCF质量评估报告</title><style>
     :root{--ink:#18342b;--muted:#667a72;--line:#d8e2dd;--brand:#2f725f;--soft:#f2f7f4;--warn:#a96200;--crit:#a62d33}*{box-sizing:border-box;scroll-behavior:smooth}body{margin:0;background:#edf3ef;color:var(--ink);font-family:"Microsoft YaHei",Arial,sans-serif}main{max-width:1180px;margin:auto;padding:30px}.hero,.card{background:white;border:1px solid var(--line);border-radius:18px;padding:24px;margin-bottom:18px}.hero{background:linear-gradient(135deg,#173c31,#347966);color:white}.hero h1{font-size:34px;margin:5px 0}.hero p{opacity:.82}.report-nav{position:sticky;top:0;z-index:20;display:flex;gap:6px;overflow:auto;margin:0 0 18px;padding:8px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.94);box-shadow:0 8px 26px rgba(24,52,43,.08)}.report-nav a{padding:8px 11px;border-radius:9px;color:var(--brand);font-size:12px;font-weight:700;text-decoration:none;white-space:nowrap}.report-nav a:hover{background:var(--soft)}.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}.kpi{background:var(--soft);border-radius:14px;padding:16px}.kpi b{display:block;font-size:25px;margin-top:6px}.score{font-size:64px;font-weight:800}.status-pass{color:#d6ffe8}.status-warning{color:#ffe09c}.status-critical{color:#ffb1b4}.readiness{border-left:6px solid var(--brand)}.readiness.caution{border-left-color:var(--warn)}.readiness.hold{border-left-color:var(--crit)}.readiness h2{margin-bottom:5px}.priority-list{display:grid;gap:8px;margin:14px 0}.priority{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;border:1px solid var(--line);border-radius:11px;background:#fafcfb}.priority div{display:grid;grid-template-columns:auto 1fr;gap:3px 9px}.priority span{grid-row:1/3;padding:3px 6px;border-radius:7px;background:#fff0cc;color:#805000;font-size:10px;font-weight:800}.priority.critical span{background:#ffe0e1;color:#98242b}.priority small{color:var(--muted)}.priority a{color:var(--brand);font-size:12px;font-weight:700;white-space:nowrap}.dimensions{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}.dimension{padding:10px;border-radius:10px;background:var(--soft)}.dimension span,.dimension b{display:block}.dimension span{color:var(--muted);font-size:10px}.dimension b{margin-top:4px;font-size:15px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}h2{font-size:21px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;padding:9px;border-bottom:1px solid #e8eeeb}th{position:sticky;top:0;background:#f6faf8}.table{max-height:520px;overflow:auto;border:1px solid var(--line);border-radius:10px}.badge{padding:3px 7px;border-radius:10px;font-weight:700}.badge.info{background:#e8eef3}.badge.warning{background:#fff0cc;color:#805000}.badge.critical{background:#ffe0e1;color:#98242b}.note{padding:12px;background:#fff7df;border-left:4px solid #d18b00}.filterbar{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.filterbar button,.filterbar input{min-height:36px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:white;color:var(--ink)}.filterbar button{cursor:pointer}.filterbar input{min-width:260px}.actions{display:flex;gap:8px;flex-wrap:wrap}.actions button{border:0;border-radius:9px;padding:10px 14px;background:#e8f1ed;color:var(--ink);cursor:pointer}.actions button:first-child{background:white}.download-grid{display:flex;gap:8px;flex-wrap:wrap}.download-grid a{padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--soft);color:var(--brand);font-size:12px;font-weight:700;text-decoration:none}.empty{padding:30px;color:var(--muted)}svg{width:100%;height:auto}@media(max-width:800px){.kpis,.grid{grid-template-columns:1fr 1fr}.dimensions{grid-template-columns:repeat(3,1fr)}}@media print{body{background:white}main{max-width:none;padding:0}.actions,.report-nav,.filterbar{display:none}.card,.hero{break-inside:avoid;border-color:#bbb}.table{max-height:none;overflow:visible}}
-    </style></head><body><main><section class='hero' id='section-overview'><div class='actions'><button onclick='window.print()'>打印/另存为PDF</button><button onclick='downloadJson()'>下载嵌入JSON</button></div><p>CallVCF · VCF DEEP QUALITY REPORT</p><h1>VCF质量评估报告</h1><div class='score status-{status}'>{score} <small style='font-size:22px'>/ 100 · {status_label}</small></div><p>{name} · {generated}</p></section>
+    </style></head><body><main><section class='hero' id='section-overview'><div class='actions'><button onclick='window.print()'>打印/另存为PDF</button><button onclick='downloadJson()'>下载嵌入JSON</button></div><p>GPA-Accelerator · VCF DEEP QUALITY REPORT</p><h1>VCF质量评估报告</h1><div class='score status-{status}'>{score} <small style='font-size:22px'>/ 100 · {status_label}</small></div><p>{name} · {generated}</p></section>
     <nav class='report-nav' aria-label='报告章节'><a href='#section-overview'>总览</a><a href='#section-input'>输入审计</a><a href='#section-site'>位点质量</a><a href='#section-samples'>样本质量</a><a href='#section-population'>群体与亲缘</a><a href='#section-warnings'>告警</a><a href='#section-recommendations'>质控建议</a><a href='#section-downloads'>下载</a></nav>
     <section class='kpis'><div class='kpi'>记录数<b>{records}</b></div><div class='kpi'>样本数<b>{samples}</b></div><div class='kpi'>染色体/Contig<b>{contigs}</b></div><div class='kpi'>严重告警<b>{critical}</b></div><div class='kpi'>一般告警<b>{warning}</b></div></section>
     <section class='card readiness {readiness_code}'><h2>{readiness_title}</h2><p>{readiness_description}</p><div class='priority-list'>{priority_rows}</div><h3>分层评分</h3><div class='dimensions'>{dimension_rows}</div></section>
@@ -1497,7 +1497,7 @@ def render_report(result):
         "genome_size": html.escape(str(profile.get("genome_size_mb") or "—")),
         "reference_hint": html.escape(profile.get("reference_hint") or "未由作物预设提供"),
         "focus_note": html.escape(
-            "非植物自定义模式：全部核心阈值由使用者提供并负责解释；CallVCF不提供动物默认参数。"
+            "非植物自定义模式：全部核心阈值由使用者提供并负责解释；GPA-Accelerator不提供动物默认参数。"
             if profile.get("analysis_scope") == "non_plant_custom"
             else ((profile.get("preset_disclaimer") or "") + " 所有作物参数均可在运行前自由修改，报告记录最终有效值与来源。" if profile.get("crop_id") else "植物分析模式：使用内置植物Profile，并记录全部用户覆盖参数及来源。")
         ),
@@ -1547,7 +1547,7 @@ class QualityJobManager:
     @staticmethod
     def default_report_root():
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".local" / "share")
-        return Path(base) / "CallVCF" / "reports"
+        return Path(base) / "GPA-Accelerator" / "vcf-reports"
 
     def catalog(self):
         return {
@@ -1699,7 +1699,7 @@ class QualityJobManager:
                 "repair_actions_executed": [],
             }
             manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-            zip_path = run_dir / "CallVCF_QC_report.zip"
+            zip_path = run_dir / "GPA_Accelerator_VCF_QC_report.zip"
             population_files = []
             for name in result.get("population_analysis", {}).get("artifacts", []):
                 item = run_dir / name

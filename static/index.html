@@ -3,20 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="本地 VCF 位点、基因型与样本交互查询工具">
-  <title>VCF Explorer · 位点与样本查询</title>
+  <meta name="description" content="本地基因型、表型质量控制与关联分析工具">
+  <title>GPA-Accelerator · 基因型与表型分析</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header class="topbar">
     <div>
-      <p class="eyebrow">LOCAL GENOMICS UTILITY</p>
-      <h1>VCF Explorer</h1>
-      <p class="lede">识别 SNP、INDEL 与 SV，按位点或样本快速查看基因型分布。</p>
+      <p class="eyebrow">GENOTYPE · PHENOTYPE · ASSOCIATION</p>
+      <h1>GPA-Accelerator</h1>
+      <p class="lede">连接基因型、表型质控、多环境统计与关联解释的本地分析工具。</p>
     </div>
     <div class="top-actions">
       <div class="status-pill" id="serverStatus"><span></span>正在连接</div>
-      <button class="quiet-button" id="shutdownBtn" title="关闭本地 CallVCF">关闭工具</button>
+      <button class="quiet-button" id="shutdownBtn" title="关闭本地 GPA-Accelerator">关闭工具</button>
     </div>
   </header>
 
@@ -106,6 +106,7 @@
         <button class="tab" data-tab="stats" role="tab">样本全局统计</button>
         <button class="tab" data-tab="lead" role="tab">Lead 位点高级分析</button>
         <button class="tab" data-tab="sample-lead" role="tab">样本 Lead-SNP 画像</button>
+        <button class="tab" data-tab="phenotype-qc" role="tab">表型质控与统计</button>
         <button class="tab" data-tab="quality" role="tab">VCF 质量评估</button>
       </div>
 
@@ -181,7 +182,7 @@
               <label class="check-option compact-check"><input id="ldblockshowWsl" type="checkbox"><span><b>Windows 通过 WSL 调用</b><small>一键安装的 LDBlockShow 在 Windows 上通过 WSL 运行</small></span></label>
               <label class="field"><span>LDBlockShow LD 图类型</span><select id="ldblockshowMetric"><option value="4">D′ 与 R²（推荐）</option><option value="1">仅 D′</option><option value="2">仅 R²</option><option value="3">R² 与 D′</option></select></label>
               <label class="field"><span>Haplotype block 算法</span><select id="ldblockshowBlockType"><option value="1">PLINK Gabriel（推荐）</option><option value="2">Solid Spine</option><option value="3">自定义 R²/D′ 阈值</option><option value="5">不划分 block</option></select></label>
-              <label class="field"><span>LDBlockShow 输出目录</span><div class="resource-input"><input id="outputDir" type="text" placeholder="留空则在 VCF 同目录创建 CallVCF_LDBlockShow"><button class="secondary browse-resource" data-target="outputDir" data-kind="output_dir">选择…</button></div></label>
+              <label class="field"><span>LDBlockShow 输出目录</span><div class="resource-input"><input id="outputDir" type="text" placeholder="留空则在 VCF 同目录创建 GPA_Accelerator_LDBlockShow"><button class="secondary browse-resource" data-target="outputDir" data-kind="output_dir">选择…</button></div></label>
             </div>
           </details>
         </div>
@@ -204,6 +205,63 @@
         <div id="sampleLeadResult" class="result-body empty-state">等待生成样本画像。</div>
       </div>
 
+      <div class="tab-pane" id="pane-phenotype-qc">
+        <div class="pane-intro">
+          <div><h3>表型质控、BLUE/BLUP与多环境可视化</h3><p>读取原始重复或汇总表型，输出描述统计、材料均值、BLUE/BLUP、离群值共识、多年多点偏移与可下载报告。</p></div>
+          <button class="primary" id="phenotypeRunBtn">开始表型分析</button>
+        </div>
+        <div class="quality-layout">
+          <section class="quality-config-card">
+            <h4>输入文件与表格结构</h4>
+            <div class="advanced-grid">
+              <label class="field span-2"><span>表型文件</span><div class="resource-input"><input id="phenotypeDataPath" type="text" placeholder="支持 XLSX、CSV、TSV、TXT"><button class="secondary browse-resource" data-target="phenotypeDataPath" data-kind="phenotype_data">选择…</button></div></label>
+              <label class="field span-2"><span>报告输出目录</span><div class="resource-input"><input id="phenotypeOutputDir" type="text" placeholder="留空使用本地默认目录"><button class="secondary browse-resource" data-target="phenotypeOutputDir" data-kind="output_dir">选择…</button></div></label>
+              <label class="field"><span>表格结构</span><select id="phenotypeFormat"><option value="auto">自动识别宽表/长表</option><option value="wide">宽表：每个表型一列</option><option value="long">长表：性状列+数值列</option></select></label>
+              <label class="field"><span>Excel工作表（可选）</span><input id="phenotypeSheet" type="text" placeholder="留空读取第一个Sheet"></label>
+              <label class="field span-2"><span>分析表型（可选）</span><textarea id="phenotypeTraits" rows="3" placeholder="留空分析全部；宽表填列名，长表填性状值，每行一个"></textarea></label>
+            </div>
+            <details class="resource-panel phenotype-mapping-panel">
+              <summary>列名映射（自动识别失败时填写）</summary>
+              <div class="threshold-grid">
+                <label class="field"><span>材料/样本列</span><input id="phenotypeColSample" type="text" placeholder="sample / material"></label>
+                <label class="field"><span>性状列（长表）</span><input id="phenotypeColTrait" type="text" placeholder="trait"></label>
+                <label class="field"><span>数值列（长表）</span><input id="phenotypeColValue" type="text" placeholder="value"></label>
+                <label class="field"><span>年份列</span><input id="phenotypeColYear" type="text" placeholder="year"></label>
+                <label class="field"><span>地点/环境列</span><input id="phenotypeColLocation" type="text" placeholder="location / env"></label>
+                <label class="field"><span>重复/区组列</span><input id="phenotypeColReplicate" type="text" placeholder="replicate / block"></label>
+                <label class="field"><span>分组列</span><input id="phenotypeColGroup" type="text" placeholder="group / Period4"></label>
+                <label class="field"><span>纬度列</span><input id="phenotypeColLatitude" type="text" placeholder="latitude / lat"></label>
+                <label class="field"><span>经度列</span><input id="phenotypeColLongitude" type="text" placeholder="longitude / lon"></label>
+              </div>
+            </details>
+          </section>
+
+          <section class="quality-config-card">
+            <h4>棉种阈值与密度图模式</h4>
+            <div class="advanced-grid">
+              <label class="field span-2"><span>棉花物种预设</span><select id="phenotypeCottonSpecies"><option value="">通用植物/不使用棉花生物学范围</option><option value="cotton_upland">陆地棉 · Gossypium hirsutum</option><option value="cotton_barbadense">海岛棉 · Gossypium barbadense</option><option value="cotton_herbaceum">草棉 · Gossypium herbaceum</option></select><small>物种范围只产生复核提示，不自动删除数据；低置信或定义不明性状会明确标记。</small></label>
+              <label class="field"><span>密度分布图</span><select id="phenotypeDensityMode"><option value="overlay">各年份多条曲线同图</option><option value="pooled">所有年份合并一张</option><option value="per_year">每个年份各一张</option></select></label>
+              <label class="field"><span>年度/地点偏移报警</span><div class="unit-input"><input id="phenotypeShiftSd" type="number" min="0.1" step="0.1" value="1.0"><span>总体SD</span></div></label>
+              <label class="field"><span>时间趋势报警</span><div class="unit-input"><input id="phenotypeTrendSd" type="number" min="0.01" step="0.05" value="0.25"><span>SD/年</span></div></label>
+              <label class="field span-2"><span>自定义生物学范围（可选）</span><textarea id="phenotypeCustomThresholds" rows="4" placeholder="PH,60,200,80,100&#10;MY_TRAIT,0,10"></textarea><small>格式：性状,单株下限,单株上限,群体均值下限,群体均值上限。三列时只设置单株范围。</small></label>
+            </div>
+          </section>
+
+          <section class="quality-config-card">
+            <h4>离群值多方法对照</h4>
+            <div class="threshold-grid">
+              <label class="field"><span>IQR倍数</span><input id="phenotypeIqr" type="number" min="0.5" step="0.1" value="1.5"></label>
+              <label class="field"><span>标准差倍数</span><input id="phenotypeSigma" type="number" min="1" step="0.1" value="3"></label>
+              <label class="field"><span>MAD robust-z</span><input id="phenotypeMad" type="number" min="1" step="0.1" value="3.5"></label>
+              <label class="field"><span>双侧尾部分位</span><input id="phenotypeTail" type="number" min="0" max="0.1" step="0.001" value="0.005"></label>
+              <label class="field"><span>统计方法共识数</span><input id="phenotypeConsensus" type="number" min="1" max="4" step="1" value="2"></label>
+            </div>
+            <div class="notice">IQR、3-sigma、MAD robust-z、尾部分位和生物学区间并行比较。离群记录只进入候选表，不会自动筛除；正式筛除应在查看重复、环境和原始记录后另行确认。</div>
+          </section>
+        </div>
+        <div id="phenotypeResult" class="result-body empty-state">尚未运行表型分析。</div>
+      </div>
+
       <div class="tab-pane" id="pane-quality">
         <div class="pane-intro">
           <div><h3>植物 VCF 深度质量评估</h3><p>内置解释体系聚焦植物、育种材料和多倍体；动物仅允许使用者完整自定义参数。</p></div>
@@ -224,7 +282,7 @@
               <label class="field"><span>繁殖/材料类型</span><select id="qualityMating"><option value="unknown">未知/混合</option><option value="outcrossing">异交/自然群体</option><option value="selfing">自交系/纯系</option><option value="clonal">克隆/单倍体</option><option value="mixed">混合群体</option></select></label>
               <label class="field"><span>扫描模式</span><select id="qualityScanMode"><option value="smart">智能抽样（推荐）</option><option value="full">完整基因型扫描</option></select><small>两种模式都准确统计总记录数、类型和FILTER。</small></label>
               <label class="field"><span>智能模式目标位点数</span><input id="qualityTargetRecords" type="number" min="1000" max="1000000" step="1000" value="200000"></label>
-              <label class="field"><span>报告输出目录</span><div class="resource-input"><input id="qualityOutputDir" type="text" placeholder="留空使用 CallVCF 默认报告目录"><button class="secondary browse-resource" data-target="qualityOutputDir" data-kind="output_dir">选择…</button></div></label>
+              <label class="field"><span>报告输出目录</span><div class="resource-input"><input id="qualityOutputDir" type="text" placeholder="留空使用 GPA-Accelerator 默认报告目录"><button class="secondary browse-resource" data-target="qualityOutputDir" data-kind="output_dir">选择…</button></div></label>
               <label class="field span-2"><span>参考基因组 FASTA（可选）</span><div class="resource-input"><input id="qualityReferencePath" type="text" placeholder="用于contig长度与REF核验；建议同时提供同名 .fai"><button class="secondary browse-resource" data-target="qualityReferencePath" data-kind="reference">选择…</button></div><small>未提供时显示为条件模块，不扣分；压缩FASTA仅做文件审计。</small></label>
               <label class="field"><span>样本元数据 TSV/CSV（可选）</span><div class="resource-input"><input id="qualitySampleMetaPath" type="text" placeholder="sample_id、group/variety、batch"><button class="secondary browse-resource" data-target="qualitySampleMetaPath" data-kind="sample_meta">选择…</button></div></label>
               <label class="field"><span>重复区/黑名单 BED（可选）</span><div class="resource-input"><input id="qualityRegionBedPath" type="text" placeholder="BED前三列；可含第4列区域名称"><button class="secondary browse-resource" data-target="qualityRegionBedPath" data-kind="bed">选择…</button></div></label>

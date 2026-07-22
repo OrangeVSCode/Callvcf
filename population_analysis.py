@@ -1,4 +1,4 @@
-"""Optional PLINK-backed population analyses for CallVCF quality reports."""
+"""Optional PLINK-backed population analyses for GPA-Accelerator quality reports."""
 
 import csv
 import bisect
@@ -140,7 +140,7 @@ class PopulationAnalyzer:
         work = run_dir / ".population_work"
         work.mkdir(parents=True, exist_ok=True)
         self.log_path = run_dir / "population_analysis.log"
-        self.log_path.write_text("CallVCF population analysis audit log\n", encoding="utf-8")
+        self.log_path.write_text("GPA-Accelerator population analysis audit log\n", encoding="utf-8")
         result["artifacts"].append(self.log_path.name)
         panel = work / "panel"
         input_flag = "--bcf" if str(vcf_path).lower().endswith(".bcf") else "--vcf"

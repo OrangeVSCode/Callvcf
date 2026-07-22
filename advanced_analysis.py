@@ -786,7 +786,7 @@ class AdvancedAnalyzer:
                 raise VCFError("未找到 LDBlockShow；可在页面中一键安装，Windows 需要启用 WSL")
         output_text = str(payload.get("output_dir") or "").strip()
         if not output_text:
-            output_text = str(Path(payload["path"]).resolve().parent / "CallVCF_LDBlockShow")
+            output_text = str(Path(payload["path"]).resolve().parent / "GPA_Accelerator_LDBlockShow")
         output_dir = Path(os.path.expandvars(os.path.expanduser(output_text))).resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         lead = ld_result["lead_record"]

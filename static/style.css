@@ -199,6 +199,12 @@ summary { padding: 10px 16px; color: var(--brand); font-size: 12px; font-weight:
 .resource-input { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
 .resource-input.triple { grid-template-columns: 1fr auto auto; }
 .resource-input button { padding: 0 11px; }
+.unit-input { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; }
+.unit-input > span { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.phenotype-mapping-panel { margin-top: 14px; }
+.phenotype-chart-preview { overflow: auto; border: 1px solid var(--line); border-radius: 12px; background: white; }
+.phenotype-chart-preview img { display: block; width: 100%; min-width: 680px; height: auto; }
+.artifact-link { cursor: pointer; }
 .lead-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
 .lead-summary .meta-card strong { white-space: normal; overflow-wrap: anywhere; }
 .analysis-section { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }

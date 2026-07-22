@@ -1,4 +1,4 @@
-const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null, qualityCatalog: null, qualityRun: null, qualityPoll: null, qcRecommendation: null, repairCatalog: null, repairPlan: null, repairPoll: null, repairCompleted: false, applyingCropPreset: false };
+const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null, phenotypeResult: null, qualityCatalog: null, qualityRun: null, qualityPoll: null, qcRecommendation: null, repairCatalog: null, repairPlan: null, repairPoll: null, repairCompleted: false, applyingCropPreset: false };
 const $ = (id) => document.getElementById(id);
 const categoryOrder = ["HOM_REF", "HET", "HOM_ALT", "MISSING", "OTHER"];
 const shortLabels = { HOM_REF: "0/0", HET: "0/1", HOM_ALT: "1/1", MISSING: "缺失", OTHER: "其他" };
@@ -176,9 +176,9 @@ async function selectLocalFile() {
 }
 
 async function shutdownLocal() {
-  if (!confirm("关闭本地 CallVCF 工具？")) return;
+  if (!confirm("关闭本地 GPA-Accelerator 工具？")) return;
   try { await api("/api/shutdown", {}); } catch (_) {}
-  document.body.innerHTML = '<main style="max-width:720px;margin:12vh auto;padding:30px"><section class="panel"><h1 style="font-size:42px">CallVCF 已关闭</h1><p class="lede">可以安全关闭这个页面。下次双击 CallVCF 即可重新启动。</p></section></main>';
+  document.body.innerHTML = '<main style="max-width:720px;margin:12vh auto;padding:30px"><section class="panel"><h1 style="font-size:42px">GPA-Accelerator 已关闭</h1><p class="lede">可以安全关闭这个页面。下次双击 GPA-Accelerator 即可重新启动。</p></section></main>';
 }
 
 async function discoverFiles() {
@@ -382,7 +382,7 @@ function renderRegionalLdMetric(data, metric) {
   const yTicks = [0, .25, .5, .75, 1].map(v => `<line x1="${left}" x2="${width-right}" y1="${assocBottom-v*assocH}" y2="${assocBottom-v*assocH}" stroke="#e0e7e3"/><text x="${left-10}" y="${assocBottom-v*assocH+4}" text-anchor="end" fill="#54675f">${(v*maxLogP).toFixed(maxLogP > 10 ? 0 : 1)}</text>`).join("");
   const legendY=height-43, legend=[0,.2,.4,.6,.8,1].map((v,i)=>`<rect x="${left+i*30}" y="${legendY}" width="30" height="12" fill="${r2Color(v)}"/><text x="${left+i*30}" y="${legendY+27}" fill="#54675f">${v}</text>`).join("");
   return `<div class="ld-metric-heading"><strong>${metricLabel} LD 热图</strong><span>${isDprime ? "|D′|（未定相基因型使用 EM 估计）" : "等位基因剂量相关平方"}</span></div><div class="ld-figure-toolbar"><span>${heatmap.plotted_count} / ${heatmap.original_count} 个连锁位点${heatmap.downsampled ? "（已按连锁强度抽样）" : ""}</span><label>PNG 倍率 <select class="ld-png-scale" data-metric="${metric}"><option>2</option><option selected>4</option><option>6</option></select></label><button class="secondary export-ld-png" data-metric="${metric}">导出高清 PNG</button><button class="secondary export-ld-pdf" data-metric="${metric}">导出矢量 PDF</button></div>
-    <div class="regional-ld-figure"><svg id="regionalLdSvg-${metric}" viewBox="0 0 ${width} ${height}" role="img" aria-label="区域关联、基因结构、Lead 连锁跨度与 ${metricLabel} 三角热图"><title>CallVCF ${metricLabel} LD heatmap</title><desc>上部为区域关联信号和基因结构，中部为 Lead 连锁跨度，下部为成对 ${metricLabel}。</desc>
+    <div class="regional-ld-figure"><svg id="regionalLdSvg-${metric}" viewBox="0 0 ${width} ${height}" role="img" aria-label="区域关联、基因结构、Lead 连锁跨度与 ${metricLabel} 三角热图"><title>GPA-Accelerator ${metricLabel} LD heatmap</title><desc>上部为区域关联信号和基因结构，中部为 Lead 连锁跨度，下部为成对 ${metricLabel}。</desc>
       <rect width="${width}" height="${height}" fill="#ffffff"/>${yTicks}${assocMarks}${leadGuides}
       <line x1="${left}" x2="${width-right}" y1="${assocBottom}" y2="${assocBottom}" stroke="#71827a"/>
       <text x="18" y="110" transform="rotate(-90 18 110)" fill="#344b43">-log10(P)</text>
@@ -413,7 +413,7 @@ function exportLdPng(metric="r2") {
   image.onload = () => {
     const canvas = document.createElement("canvas"); canvas.width = view.width * scale; canvas.height = view.height * scale;
     const ctx = canvas.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-    URL.revokeObjectURL(url); canvas.toBlob(out => downloadBlob(out, `CallVCF_LD_${metric}_${scale}x.png`), "image/png");
+    URL.revokeObjectURL(url); canvas.toBlob(out => downloadBlob(out, `GPA_Accelerator_LD_${metric}_${scale}x.png`), "image/png");
   };
   image.onerror = () => { URL.revokeObjectURL(url); toast("PNG 导出失败", true); };
   image.src = url;
@@ -431,7 +431,7 @@ function exportLdPdf(metric="r2") {
   const region = ld.search_region, regionSpan = Math.max(1, region.end-region.start), px = pos => left+(pos-region.start)/regionSpan*plotW;
   const association = (result.phenotype?.records || []).filter(r => r.chrom===region.chrom && r.pos>=region.start && r.pos<=region.end);
   const maxLogP = Math.max(1, ...association.map(r => -Math.log10(Math.max(Number(r.pvalue),1e-300))));
-  const commands = ["1 1 1 rg 0 0 842 595 re f", "0.15 0.22 0.19 rg", `BT /F1 15 Tf 58 572 Td (${pdfEscape(`CallVCF regional association, genes and ${metricLabel} LD`)}) Tj ET`, `BT /F1 8 Tf 58 557 Td (${pdfEscape(`${region.chrom}:${region.start}-${region.end}; ${heatmap.plotted_count} linked variants; pairwise ${metricLabel}`)}) Tj ET`, "0.55 0.62 0.59 RG 0.6 w 58 468 m 818 468 l S"];
+  const commands = ["1 1 1 rg 0 0 842 595 re f", "0.15 0.22 0.19 rg", `BT /F1 15 Tf 58 572 Td (${pdfEscape(`GPA-Accelerator regional association, genes and ${metricLabel} LD`)}) Tj ET`, `BT /F1 8 Tf 58 557 Td (${pdfEscape(`${region.chrom}:${region.start}-${region.end}; ${heatmap.plotted_count} linked variants; pairwise ${metricLabel}`)}) Tj ET`, "0.55 0.62 0.59 RG 0.6 w 58 468 m 818 468 l S"];
   association.slice(0,12000).forEach(r => {
     const y=468+(-Math.log10(Math.max(Number(r.pvalue),1e-300))/maxLogP)*68;
     commands.push(`0.35 0.45 0.41 rg ${(px(r.pos)-1).toFixed(2)} ${(y-1).toFixed(2)} 2 2 re f`);
@@ -471,7 +471,7 @@ function exportLdPdf(metric="r2") {
   objects.forEach((obj, i) => { offsets.push(new TextEncoder().encode(pdf).length); pdf += `${i+1} 0 obj\n${obj}\nendobj\n`; });
   const xref = new TextEncoder().encode(pdf).length;
   pdf += `xref\n0 ${objects.length+1}\n0000000000 65535 f \n${offsets.slice(1).map(x => String(x).padStart(10,"0")+" 00000 n ").join("\n")}\ntrailer\n<< /Size ${objects.length+1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
-  downloadBlob(new Blob([pdf], {type:"application/pdf"}), `CallVCF_LD_${metric}.pdf`);
+  downloadBlob(new Blob([pdf], {type:"application/pdf"}), `GPA_Accelerator_LD_${metric}.pdf`);
 }
 
 function renderLeadResult(data) {
@@ -668,7 +668,7 @@ function downloadProfile() {
   const rows = state.lastProfileResult?.rows || [];
   const fields = ["sample","lead","trait","gt","dosage_alt","effect_allele","effect_copies","cohort_mean_effect_copies","beta","pvalue","neg_log10_p","significant","trait_direction","effect_direction","trend","advantage_contribution"];
   const text = [fields.join("\t"), ...rows.map(row => fields.map(k => row[k] ?? "").join("\t"))].join("\n");
-  downloadBlob(new Blob([text], {type:"text/tab-separated-values;charset=utf-8"}), "CallVCF_sample_lead_profile.tsv");
+  downloadBlob(new Blob([text], {type:"text/tab-separated-values;charset=utf-8"}), "GPA_Accelerator_sample_lead_profile.tsv");
 }
 
 async function runAction(action, button) {
@@ -1175,7 +1175,7 @@ function updateRepairFields() {
   $("repairExecutorCard").querySelector(".repair-qc-field").classList.toggle("hidden", !isQc);
   if (isQc && !state.qcRecommendation) $("qcRecommendationSummary").innerHTML = "<b>尚无自适应参数。</b>请先运行上方质量评估；也可以切换为“使用者自定义”后手工设置。";
   if (isQc && !$("repairOutputPath").value.trim() && currentPath()) {
-    $("repairOutputPath").value = currentPath().replace(/(?:\.vcf(?:\.gz|\.bgz)?|\.bcf)$/i, "") + ".CallVCF_QC.vcf.gz";
+    $("repairOutputPath").value = currentPath().replace(/(?:\.vcf(?:\.gz|\.bgz)?|\.bcf)$/i, "") + ".GPA_QC.vcf.gz";
   }
   if (action === "mask_genotypes_copy") {
     $("repairExpressionLabel").textContent = "要掩蔽为缺失的GT条件";
@@ -1238,6 +1238,57 @@ async function pollRepair(planId) {
   } catch (error) { toast(error.message, true); }
 }
 
+function phenotypeNumber(id, fallback) {
+  const value = Number($(id).value);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function renderPhenotypeResult(data) {
+  const result = data.result, summary = result.summary;
+  const artifacts = data.artifacts || [];
+  const report = artifacts.find(x => x.name === "phenotype_report.html");
+  const archive = artifacts.find(x => x.name.endsWith("phenotype_QC.zip"));
+  const density = artifacts.find(x => x.name.startsWith("density_") && x.name.endsWith(".svg"));
+  const warningRows = (result.warnings || []).slice(0, 30).map(x => `<tr><td class="level-${escapeHtml(x.level)}">${escapeHtml(x.level)}</td><td>${escapeHtml(x.trait)}</td><td>${escapeHtml(x.message)}</td><td>${escapeHtml(x.evidence)}</td><td>${escapeHtml(x.advice)}</td></tr>`).join("") || '<tr><td colspan="5">当前规则下未发现报警。</td></tr>';
+  const traitRows = (result.traits || []).map(x => `<tr><td><b>${escapeHtml(x.trait)}</b><small>${escapeHtml(x.name || "")}</small></td><td>${formatNumber(x.summary.n)}</td><td>${Number(x.summary.mean).toPrecision(5)}</td><td>${Number(x.summary.sd).toPrecision(4)}</td><td>${x.variance_components.broad_sense_h2_entry_mean == null ? "—" : Number(x.variance_components.broad_sense_h2_entry_mean).toFixed(3)}</td><td>${formatNumber(x.outlier_count)}</td><td>${escapeHtml(x.threshold.confidence)}</td></tr>`).join("");
+  const links = artifacts.filter(x => !x.name.startsWith("density_")).map(x => `<a class="artifact-link" href="${escapeHtml(x.url)}">${escapeHtml(x.name)}</a>`).join("");
+  $("phenotypeResult").className = "result-body";
+  $("phenotypeResult").innerHTML = `
+    <div class="readiness-banner ${summary.status === "pass" ? "ready" : "caution"}"><b>${summary.status === "pass" ? "表型检查完成，未触发当前报警规则" : `表型检查完成：${formatNumber(summary.warnings)} 项需要复核`}</b><span>离群候选不会自动删除；BLUE/BLUP用于快速质控和排序，复杂空间或G×E模型请结合试验设计复核。</span></div>
+    <div class="quality-summary"><div class="meta-card"><span>观测值</span><strong>${formatNumber(summary.observations)}</strong></div><div class="meta-card"><span>材料</span><strong>${formatNumber(summary.samples)}</strong></div><div class="meta-card"><span>表型</span><strong>${formatNumber(summary.traits)}</strong></div><div class="meta-card"><span>年份 / 地点</span><strong>${formatNumber(summary.years)} / ${formatNumber(summary.locations)}</strong></div><div class="meta-card"><span>离群候选</span><strong>${formatNumber(summary.outliers)}</strong></div></div>
+    <div class="handoff-bar"><strong>报告与完整结果</strong>${report ? `<a class="artifact-link" target="_blank" rel="noopener" href="${escapeHtml(report.view_url)}">打开动态HTML报告</a>` : ""}${archive ? `<a class="artifact-link" href="${escapeHtml(archive.url)}">下载完整报告ZIP</a>` : ""}</div>
+    ${density ? `<section class="quality-section"><h4>密度分布图预览</h4><div class="phenotype-chart-preview"><img src="${escapeHtml(density.view_url)}" alt="表型密度分布"></div><p class="sub">完整报告可切换全部表型/年份，并提供时间播放和经纬度动态分布。</p></section>` : ""}
+    <section class="quality-section"><h4>统计、BLUE/BLUP与遗传力摘要</h4><div class="table-wrap"><table><thead><tr><th>表型</th><th>N</th><th>均值</th><th>SD</th><th>H²</th><th>离群</th><th>阈值置信度</th></tr></thead><tbody>${traitRows}</tbody></table></div></section>
+    <section class="quality-section"><h4>报警与复核建议</h4><div class="table-wrap"><table><thead><tr><th>级别</th><th>表型</th><th>问题</th><th>证据</th><th>建议</th></tr></thead><tbody>${warningRows}</tbody></table></div></section>
+    <section class="quality-section"><h4>结果文件</h4><div class="artifact-list">${links}</div><p class="sub">输出目录：${escapeHtml(data.run_dir)}</p></section>`;
+}
+
+async function runPhenotypeAnalysis() {
+  const button = $("phenotypeRunBtn"), target = $("phenotypeResult");
+  const path = $("phenotypeDataPath").value.trim();
+  if (!path) return toast("请选择表型文件", true);
+  setLoading(target, button, "正在读取表型、计算多种统计口径并生成图形…");
+  const columnIds = {sample:"phenotypeColSample", trait:"phenotypeColTrait", value:"phenotypeColValue", year:"phenotypeColYear", location:"phenotypeColLocation", replicate:"phenotypeColReplicate", group:"phenotypeColGroup", latitude:"phenotypeColLatitude", longitude:"phenotypeColLongitude"};
+  const columns = {};
+  Object.entries(columnIds).forEach(([key,id]) => { const value=$(id).value.trim(); if (value) columns[key]=value; });
+  try {
+    const data = await api("/api/phenotype/analyze", {
+      path, output_dir: $("phenotypeOutputDir").value.trim(), format: $("phenotypeFormat").value,
+      sheet: $("phenotypeSheet").value.trim(), traits: $("phenotypeTraits").value.trim(), columns,
+      cotton_species: $("phenotypeCottonSpecies").value, density_mode: $("phenotypeDensityMode").value,
+      custom_thresholds: $("phenotypeCustomThresholds").value,
+      shift_sd: phenotypeNumber("phenotypeShiftSd",1), trend_sd_per_year: phenotypeNumber("phenotypeTrendSd",.25),
+      outlier: {iqr_factor:phenotypeNumber("phenotypeIqr",1.5), sigma:phenotypeNumber("phenotypeSigma",3), mad_z:phenotypeNumber("phenotypeMad",3.5), tail_fraction:phenotypeNumber("phenotypeTail",.005), consensus:phenotypeNumber("phenotypeConsensus",2)},
+    });
+    state.phenotypeResult = data;
+    localStorage.setItem("gpaPhenotypePath", path);
+    renderPhenotypeResult(data);
+    toast(`表型分析完成：${formatNumber(data.result.summary.traits)} 个表型，${formatNumber(data.result.summary.outliers)} 个离群候选`);
+  } catch (error) {
+    target.className = "result-body empty-state"; target.textContent = error.message; toast(error.message, true);
+  } finally { clearLoading(target, button); }
+}
+
 function initEvents() {
   $("selectFileBtn").addEventListener("click", selectLocalFile);
   $("shutdownBtn").addEventListener("click", shutdownLocal);
@@ -1256,6 +1307,7 @@ function initEvents() {
   $("sampleSuggestions").addEventListener("click", e => { const btn = e.target.closest("[data-sample]"); if (btn) toggleSample(btn.dataset.sample); });
   $("leadRunBtn").addEventListener("click", runLeadAnalysis);
   $("sampleLeadRunBtn").addEventListener("click", runSampleLeadProfile);
+  $("phenotypeRunBtn").addEventListener("click", runPhenotypeAnalysis);
   $("qualityRunBtn").addEventListener("click", runQualityAssessment);
   $("qualityCancelBtn").addEventListener("click", cancelQualityAssessment);
   $("qualityCrop").addEventListener("change", applyCropPreset);
@@ -1309,6 +1361,8 @@ function initEvents() {
 document.addEventListener("DOMContentLoaded", () => {
   const saved = localStorage.getItem("vcfExplorerPath");
   if (saved) $("vcfPath").value = saved;
+  const savedPhenotype = localStorage.getItem("gpaPhenotypePath");
+  if (savedPhenotype) $("phenotypeDataPath").value = savedPhenotype;
   initEvents();
   restoreAdvancedSettings();
   loadToolStatus();

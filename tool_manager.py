@@ -25,18 +25,21 @@ LDBLOCKSHOW_URL = "https://codeload.github.com/hewm2008/LDBlockShow/zip/refs/hea
 
 
 def tool_root():
-    override = os.environ.get("CALLVCF_TOOL_DIR")
+    override = os.environ.get("GPA_ACCELERATOR_TOOL_DIR") or os.environ.get("CALLVCF_TOOL_DIR")
     if override:
         return Path(override).expanduser().resolve()
     if platform.system() == "Windows":
         base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
     else:
         base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
-    return (base / "CallVCF" / "tools").resolve()
+    current = (base / "GPA-Accelerator" / "tools").resolve()
+    legacy = (base / "CallVCF" / "tools").resolve()
+    # Reuse existing managed tools after the product rename; new installations use the new root.
+    return legacy if legacy.exists() and not current.exists() else current
 
 
 def _download(url, destination, max_bytes=200 * 1024 * 1024):
-    request = urllib.request.Request(url, headers={"User-Agent": "CallVCF/1.0"})
+    request = urllib.request.Request(url, headers={"User-Agent": "GPA-Accelerator/1.0"})
     digest = hashlib.sha256()
     total = 0
     with urllib.request.urlopen(request, timeout=90) as response, destination.open("wb") as handle:

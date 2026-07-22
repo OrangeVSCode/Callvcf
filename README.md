@@ -1,6 +1,6 @@
-# CallVCF
+# GPA-Accelerator
 
-CallVCF 是一个面向大规模 VCF 的本地交互查询工具。它在浏览器中提供界面，在服务器端调用 `bcftools`，不会把基因型数据上传到第三方服务。
+GPA-Accelerator 是一个面向植物基因型、表型质量控制和关联解释的本地交互工具。它在浏览器中提供界面，在本机调用 `bcftools`、PLINK 与可选分析组件，不会把基因型或表型数据上传到第三方服务。
 
 ## 功能
 
@@ -15,14 +15,16 @@ CallVCF 是一个面向大规模 VCF 的本地交互查询工具。它在浏览�
 - 匹配本地功能注释表和蛋白结构域表，保留具体基因、转录本、HGVS 与结构域记录。
 - 读取单个或整目录 EMMAX/GWAS `.ps` 文件，汇总连锁区域内每个表型的最小 P 值与峰值 Marker。
 - 可调用本地 LDBlockShow，传入 VCF、连锁区间、GFF 与区域 GWAS 数据，保留 `.blocks.gz`、`.site.gz`、SVG/PNG 等原始结果。
-- 页面内置可选工具管理器：一键下载官方 PLINK 1.9 与 LDBlockShow，自动保存到当前用户的 CallVCF 工具目录；第三方工具不上传用户数据。
+- 页面内置可选工具管理器：一键下载官方 PLINK 1.9 与 LDBlockShow，自动保存到当前用户的 GPA-Accelerator 工具目录；第三方工具不上传用户数据。
+- 表型质控支持 XLSX、CSV、TSV 和 TXT 的宽表/长表自动识别，按原始重复计算材料×年份×地点均值，并输出环境调整 BLUE、经验随机效应 BLUP、遗传力、可靠度和方差组分。
+- 同时运行 IQR、3-sigma、MAD robust-z、尾部分位数与生物学范围检查；生成年度密度叠加图/合并图/逐年图、时间播放、经纬度动态分布和表型相关热图。
 - `.vcf.gz` 的位点查询、样本统计、LD/热图、基因注释、样本画像、PLINK 与 LDBlockShow 路径均直接读取压缩源文件，不生成同体积的解压 VCF 副本。
 - bcftools 可用且 `.tbi/.csi` 索引有效时随机访问；没有索引时自动切换到内存管道或压缩流式筛选，不再落盘生成临时 BCF 子集。
 - 支持服务器目录内 VCF/BCF 文件发现，无需复制大型文件。
 
 ## 运行条件
 
-- Python 3.8 或更高版本（仅使用标准库）
+- Python 3.8 或更高版本；源码运行读取 XLSX 时需要 `openpyxl`，发布版已打包
 - `bcftools` 1.10 或更高版本
 - 推荐同时安装 `bgzip` 和 `tabix`
 
@@ -42,7 +44,7 @@ conda install -c bioconda bcftools
 
 ### Windows 本地页面
 
-安装 Python 3.8+ 后，直接双击 `Start_CallVCF.bat`。工具会自动打开浏览器，并只监听本机 `127.0.0.1`。纯文本 VCF、普通 `.vcf.gz` 和 BGZF `.vcf.gz` 均可直接读取；安装 `bcftools` 后可利用 `.tbi/.csi` 索引加速大型 VCF，并支持 BCF。
+安装 Python 3.8+ 后，直接双击 `Start_GPA-Accelerator.bat`。工具会自动打开浏览器，并只监听本机 `127.0.0.1`。纯文本 VCF、普通 `.vcf.gz` 和 BGZF `.vcf.gz` 均可直接读取；安装 `bcftools` 后可利用 `.tbi/.csi` 索引加速大型 VCF，并支持 BCF。
 
 也可以运行：
 
@@ -50,7 +52,7 @@ conda install -c bioconda bcftools
 python start_local.py
 ```
 
-GitHub 的 `build-windows` 工作流可以构建单文件 `CallVCF.exe`；手动触发工作流后从 Actions artifact 下载，发布 Release 时也会自动附加 EXE。
+GitHub 的 `build-windows` 工作流可以构建单文件 `GPA-Accelerator.exe`；手动触发工作流后从 Actions artifact 下载，发布 Release 时也会自动附加 EXE。
 
 ### Linux / 服务器
 
@@ -93,9 +95,21 @@ ssh -L 8765:127.0.0.1:8765 user@server
 
 样本统计留空位点列表时会扫描整个 VCF。对于数百万记录的文件，这一步可能需要数分钟。
 
+## 表型质量控制、BLUE/BLUP与可视化
+
+“表型质控与统计”页签可独立于 VCF 使用。输入 `.xlsx`、`.csv`、`.tsv` 或 `.txt` 后，软件会自动判断宽表或长表，并识别材料、性状、数值、年份、地点、重复/区组、分组、经纬度；自动识别不正确时可以逐列指定。可留空表型列表分析全部，也可以只分析一个或一批表型。
+
+原始重复首先按材料×表型×年份×地点汇总均值、中位数、SD和重复数；每个表型同时输出 N、均值、中位数、5%截尾均值、方差、SD、SE、CV、MAD、IQR、P05/P25/P75/P95、偏度和峰度。BLUE采用环境固定效应中心化后的材料均值；BLUP采用随机材料效应的经验收缩估计，并导出遗传方差、残差方差、材料均值遗传力、重复调和均值和每个材料的BLUP可靠度。该快速模型适合质控与初步排序；复杂空间设计、亲缘矩阵或正式G×E推断仍需经试验设计验证的REML模型复核。
+
+离群检测并行比较 IQR、3-sigma、MAD robust-z、双侧尾部分位数和生物学范围。使用者可调整全部阈值与“至少几种统计方法一致才算共识”；结果只进入复核候选表，不会自动删除数据。报告还检查缺失率、非数值内容、重复观测键、零方差、小样本、年份/地点均值偏移、整体年度趋势和不同地点年度趋势分化。
+
+棉花预设区分陆地棉、海岛棉和草棉，覆盖指南中有依据的 PH、FBH、FFN、FBN、FNN、BN、SBW、LP、SPAD、LA、FL、UNI、FS、MIC、EL、LN、FBA、LIA。指南标记“数据不足”或定义不明的性状不会强行产生伪精确区间；仍然执行统计离群、多环境偏移和用户自定义范围检查。百分比若明显使用0–1编码，报告会记录本次比较的自动尺度换算，避免整列误报。
+
+密度图可选择合并所有年份、每年独立输出，或把多个年份的曲线画在同一张图。动态HTML报告提供表型切换、年度滑块/播放、时间均值曲线和基于经纬度的地理分布变化；同时导出Pearson/Spearman表型相关表和相关热图。完整ZIP包含统计、重复均值、环境汇总、BLUE/BLUP、离群候选、报警、棉花阈值和全部SVG图。
+
 ## VCF 质量评估与报告
 
-“VCF 质量评估”页签按文件、位点、样本、样本对和群体五层生成本地深度质量报告。CallVCF现在聚焦植物分析，内置通用二倍体植物、自交植物/纯系、通用多倍体植物、棉花群体、棉花自交系和植物单倍体/细胞器 Profile。页面还可直接选择水稻；普通/面包小麦、硬粒小麦、野生二粒小麦和一粒小麦；陆地棉、海岛棉和草棉；以及大豆、玉米、谷子/高粱、拟南芥、番茄、马铃薯、辣椒、瓜类和烟草，自动填入物种属性、参考版本提示与质量阈值建议起点。所有自动填充值都可继续修改；报告会记录每项最终值来自作物预设还是用户覆盖。动物不再提供任何内置默认Profile：必须进入“自定义物种与阈值”，明确填写物种、GT编码倍性、繁殖方式及12项核心阈值，并在运行前确认参数解释责任；前后端都会拒绝绕过该约束。
+“VCF 质量评估”页签按文件、位点、样本、样本对和群体五层生成本地深度质量报告。GPA-Accelerator聚焦植物分析，内置通用二倍体植物、自交植物/纯系、通用多倍体植物、棉花群体、棉花自交系和植物单倍体/细胞器 Profile。页面还可直接选择水稻；普通/面包小麦、硬粒小麦、野生二粒小麦和一粒小麦；陆地棉、海岛棉和草棉；以及大豆、玉米、谷子/高粱、拟南芥、番茄、马铃薯、辣椒、瓜类和烟草，自动填入物种属性、参考版本提示与质量阈值建议起点。所有自动填充值都可继续修改；报告会记录每项最终值来自作物预设还是用户覆盖。动物不再提供任何内置默认Profile：必须进入“自定义物种与阈值”，明确填写物种、GT编码倍性、繁殖方式及12项核心阈值，并在运行前确认参数解释责任；前后端都会拒绝绕过该约束。
 
 作物预设是透明的建议起始值，不是跨项目通用的生物学判定线。QUAL建议值仅在VCF的QUAL字段覆盖充分时进入智能质控；水稻Ti/Tv经验参考只对足量双等位SNP集给出解释性提醒，不会被单独用来删除位点。倍性、GT编码、繁殖方式、杂合率、缺失率、DP/GQ、AB、HWE、QUAL和Ti/Tv参数都可以在运行前自由调整。
 
@@ -116,7 +130,7 @@ ssh -L 8765:127.0.0.1:8765 user@server
 - 智能抽样：遍历全部记录，准确统计总数、SNP/INDEL/SV 类型、FILTER 与染色体分布；跨全基因组确定性抽取目标数量位点展开逐样本 GT/DP/GQ/AD 评估。
 - 完整扫描：每条记录均进入逐样本指标计算，适合较小 VCF 或需要完整精度的场景。
 
-每次运行会生成独立目录和以下下载文件：`report.html`、`report_summary.json`、`sample_metrics.tsv`、`variant_metrics.tsv`、`warnings.tsv`、`analysis_priorities.tsv`、`score_dimensions.tsv`、`run_manifest.json` 和便携的 `CallVCF_QC_report.zip`；启用相关群体模块时还会加入 `pairwise_similarity.tsv`、`pca_scores.tsv` 和 `roh_segments.tsv`。HTML 可离线打开，并通过浏览器打印或另存为 PDF。
+每次运行会生成独立目录和以下下载文件：`report.html`、`report_summary.json`、`sample_metrics.tsv`、`variant_metrics.tsv`、`warnings.tsv`、`analysis_priorities.tsv`、`score_dimensions.tsv`、`run_manifest.json` 和便携的 `GPA_Accelerator_VCF_QC_report.zip`；启用相关群体模块时还会加入 `pairwise_similarity.tsv`、`pca_scores.tsv` 和 `roh_segments.tsv`。HTML 可离线打开，并通过浏览器打印或另存为 PDF。
 
 质量评估可选用 PLINK 1.9 继续计算 HWE、PCA、亲缘关系（IBD/PI_HAT）、LD 衰减和 ROH。群体模块先建立二等位、缺失率和 MAF 过滤后的标记面板；PCA 与亲缘关系使用 LD 剪枝面板，LD 衰减改用未剪枝的 QC 面板，避免把真实短距离相关性预先删掉。PCA 输出稳健距离离群样本，亲缘模块输出疑似样本对、每个样本的最近邻/相似度摘要与连通分量。棉花、自交材料和多倍体 Profile 的 HWE 只作描述，不会因群体结构或繁殖方式导致全样本报警；只有适用 Profile 的 HWE 与高相似样本对会以保守方式进入分层告警，且不会自动删除样本。
 
@@ -124,7 +138,7 @@ ssh -L 8765:127.0.0.1:8765 user@server
 
 “智能质控并进行前后复评”把这些步骤组成一个受控流程：依据物种 Profile、SNP/INDEL/SV 构成以及 DP/GQ/QD/MQ/FS/SOR 等字段的实际覆盖情况生成保守默认参数；用户可切换到自定义模式逐项修改。默认只掩蔽明确低质量 GT、补全统计标签并按位点缺失率过滤，不机械删除稀有位点、多等位位点、非 PASS 记录或高缺失样本。执行后自动重新评估原始 VCF 与新副本，报告评分变化、位点/样本数量变化、已解决/新增/持续告警及下一步建议，并输出独立 HTML/JSON 对比报告。样本排除、标准化和其他改变记录集合的动作仍需明确勾选与二次确认。
 
-Windows 版可在“本地软件资源”中一键安装 bcftools。由于官方主要面向 Unix 环境，CallVCF 使用已初始化的 Ubuntu/WSL 作为受控运行后端，并保留安装来源与许可证记录；这比捆绑来源不明的第三方 `bcftools.exe` 更可审计。首次使用前需完成 Ubuntu 用户创建。
+Windows 版可在“本地软件资源”中一键安装 bcftools。由于官方主要面向 Unix 环境，GPA-Accelerator 使用已初始化的 Ubuntu/WSL 作为受控运行后端，并保留安装来源与许可证记录；这比捆绑来源不明的第三方 `bcftools.exe` 更可审计。首次使用前需完成 Ubuntu 用户创建。
 
 ## Lead 位点高级分析
 
@@ -136,7 +150,7 @@ Windows 版可在“本地软件资源”中一键安装 bcftools。由于官方
 4. “基因结构轨道”和“相对基因位置”需要 GFF3/GTF；“突变功能”优先读取 VCF INFO 中的 `ANN`/`CSQ`/`BCSQ`，也可补充至少含 `chr`、`pos` 的 TSV/CSV。
 5. “蛋白结构域”需要本地 TSV/CSV，表头建议含 `gene`、`gene_id`、`protein` 或 `protein_id`。
 6. “区域表型关联”接受一个 `.ps` 文件或包含多个 `.ps` 的目录，可识别常见 `marker/chr/pos/pvalue` 表头和 `chr:pos` Marker。
-7. “调用 LDBlockShow”可直接使用页面中的“一键安装”。Windows 上 LDBlockShow 通过 WSL 运行；PLINK 1.9 使用官方 Windows 64 位版。也可手动指定可执行文件。输出默认放在 VCF 同目录的 `CallVCF_LDBlockShow`，也可指定其他目录。
+7. “调用 LDBlockShow”可直接使用页面中的“一键安装”。Windows 上 LDBlockShow 通过 WSL 运行；PLINK 1.9 使用官方 Windows 64 位版。也可手动指定可执行文件。输出默认放在 VCF 同目录的 `GPA_Accelerator_LDBlockShow`，也可指定其他目录。
 8. LDBlockShow 图形可选择 D′、R² 或两者，并可选择 PLINK Gabriel、Solid Spine、自定义阈值或不划分 block。PLINK Gabriel 模式使用 LDBlockShow 官方包内配套的 PLINK。
 
 注意：页面按成对 `r²` 阈值跨度给出的“工作连锁区间”，与 Gabriel、solid-spine 等正式 haplotype block 算法不是同一概念。勾选 LDBlockShow 后会同时获得软件自身的 block 判定结果。
@@ -160,7 +174,7 @@ LDBlockShow -InVCF input.vcf.gz -OutPut result_prefix -Region chr:start-end -Sel
 
 ## 可选第三方工具
 
-CallVCF 本体不会把 PLINK 或 LDBlockShow 二进制直接合并进单文件 EXE；用户点击“一键安装”后，软件从官方地址下载到 `%LOCALAPPDATA%\CallVCF\tools`（Linux 为 `~/.local/share/CallVCF/tools`）。这样可以独立更新、保留原始许可证，并避免无谓增大安装包。
+GPA-Accelerator 本体不会把 PLINK 或 LDBlockShow 二进制直接合并进单文件 EXE；用户点击“一键安装”后，软件从官方地址下载到 `%LOCALAPPDATA%\GPA-Accelerator\tools`（Linux 为 `~/.local/share/GPA-Accelerator/tools`）。若旧版 `%LOCALAPPDATA%\CallVCF\tools` 已存在，新版会继续复用，避免重复安装。这样可以独立更新、保留原始许可证，并避免无谓增大安装包。
 
 - PLINK 1.9：GPL-3.0，官方稳定版 beta 7.11（2025-08-19）。
 - LDBlockShow：MIT，官方维护仓库 `hewm2008/LDBlockShow`；官方仅支持 Linux/Unix/macOS，Windows 需要 WSL。
@@ -178,7 +192,7 @@ tabix -p vcf input.vcf.gz
 
 未索引文件仍可查询，工具会直接顺序读取 `.vcf.gz` 数据流，不会先解压成 `.vcf`。如果文件已有 `.tbi/.csi` 但页面显示“检测到索引 · 当前流式读取”，说明当前使用纯 Python 后端；安装/配置 bcftools 后才会显示并使用“已索引 · 随机访问”。
 
-未索引 VCF 无法从文件头直接得知总记录数，因此初次载入时“记录数”可能显示 `—`。点击该卡片中的“统计总数”，CallVCF 会完整顺序读取一次压缩数据流并缓存结果，全程不生成解压副本。以项目测试用的 250 MB、370 样本 SNP BGZF 为例，本机统计 3,002,929 条记录约需 10 秒；实际时间取决于磁盘和压缩率。
+未索引 VCF 无法从文件头直接得知总记录数，因此初次载入时“记录数”可能显示 `—`。点击该卡片中的“统计总数”，GPA-Accelerator 会完整顺序读取一次压缩数据流并缓存结果，全程不生成解压副本。以项目测试用的 250 MB、370 样本 SNP BGZF 为例，本机统计 3,002,929 条记录约需 10 秒；实际时间取决于磁盘和压缩率。
 
 ## 安全说明
 

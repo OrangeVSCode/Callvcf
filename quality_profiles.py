@@ -1,4 +1,4 @@
-"""Plant-focused species, crop and ploidy defaults for CallVCF quality reports.
+"""Plant-focused species, crop and ploidy defaults for GPA-Accelerator quality reports.
 
 The crop presets are transparent starting points.  They never lock a value:
 the UI sends any user edits back to :func:`resolve_profile`, which records the
@@ -311,7 +311,7 @@ def resolve_profile(config=None):
     if crop and requested_kingdom != "plant":
         raise VCFError("作物预设只能用于植物分析")
     if profile_id != "custom" and requested_kingdom != "plant":
-        raise VCFError("CallVCF内置Profile仅用于植物；动物或其他非植物数据必须选择“自定义物种与阈值”")
+        raise VCFError("GPA-Accelerator内置Profile仅用于植物；动物或其他非植物数据必须选择“自定义物种与阈值”")
     profile["kingdom"] = requested_kingdom if profile_id == "custom" else "plant"
 
     crop_source = "作物预设：{}".format(crop["name"]) if crop else None

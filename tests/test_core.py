@@ -17,6 +17,7 @@ from quality_engine import QualityEvaluator, QualityJobManager, render_report, _
 from quality_profiles import crop_catalog, profile_catalog, resolve_profile
 from population_analysis import PopulationAnalyzer
 from repair_engine import RepairExecutor, _quality_comparison
+from phenotype_engine import PhenotypeAnalyzer, phenotype_catalog
 
 
 def bgzf_block(data):
@@ -32,6 +33,55 @@ def bgzf_block(data):
 
 
 class CoreTests(unittest.TestCase):
+    def test_phenotype_qc_blue_blup_outliers_and_artifacts(self):
+        rows = ["sample,trait,value,year,location,latitude,longitude,replicate,group"]
+        for sample_index, sample in enumerate(("C1", "C2", "C3", "C4")):
+            for year_index, year in enumerate((2022, 2023, 2024)):
+                for rep in (1, 2):
+                    ph = 90 + sample_index * 3 + year_index * 2 + rep * .2
+                    if sample == "C4" and year == 2024 and rep == 2:
+                        ph = 400
+                    location = "A" if year_index % 2 == 0 else "B"
+                    rows.append(f"{sample},PH,{ph},{year},{location},{35+year_index},{110+year_index},{rep},G{sample_index%2+1}")
+                    rows.append(f"{sample},FL,{33+sample_index*.4+year_index*.2},{year},{location},{35+year_index},{110+year_index},{rep},G{sample_index%2+1}")
+        with tempfile.TemporaryDirectory(prefix="gpa-phenotype-") as temp_name:
+            source = Path(temp_name) / "phenotype.csv"
+            source.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            analyzer = PhenotypeAnalyzer()
+            output = analyzer.analyze({
+                "path": str(source), "output_dir": str(Path(temp_name) / "reports"),
+                "format": "long", "cotton_species": "cotton_barbadense", "density_mode": "overlay",
+                "outlier": {"iqr_factor": 1.5, "sigma": 3, "mad_z": 3.5, "tail_fraction": .005, "consensus": 2},
+            })
+            result = output["result"]
+            self.assertEqual(result["summary"]["traits"], 2)
+            self.assertEqual(result["summary"]["samples"], 4)
+            self.assertEqual(result["summary"]["years"], 3)
+            self.assertTrue(any(x["trait"] == "PH" for x in result["outliers"]))
+            ph = next(x for x in result["traits"] if x["trait"] == "PH")
+            self.assertEqual(ph["threshold"]["mean"], [100, 180])
+            self.assertEqual(len(ph["year_summaries"]), 3)
+            self.assertIsNotNone(ph["variance_components"]["broad_sense_h2_entry_mean"])
+            names = {x["name"] for x in output["artifacts"]}
+            self.assertTrue({"phenotype_report.html", "trait_statistics.tsv", "replicate_averages.tsv", "blue_blup_estimates.tsv", "outlier_candidates.tsv", "cotton_thresholds.tsv", "GPA_Accelerator_phenotype_QC.zip"}.issubset(names))
+            report = analyzer.artifact(output["run_id"], "phenotype_report.html").read_text(encoding="utf-8")
+            self.assertIn("时间动态", report)
+            self.assertIn("地理分布动态", report)
+            self.assertIn("BLUE/BLUP", report)
+
+            from openpyxl import Workbook
+            workbook = Workbook(); sheet = workbook.active; sheet.title = "Raw phenotype"
+            sheet.append(rows[0].split(","))
+            for line in rows[1:]: sheet.append(line.split(","))
+            xlsx = Path(temp_name) / "phenotype.xlsx"; workbook.save(xlsx)
+            xlsx_output = analyzer.analyze({"path": str(xlsx), "output_dir": str(Path(temp_name) / "xlsx-reports"), "format": "auto", "sheet": "Raw phenotype"})
+            self.assertEqual(xlsx_output["result"]["input"]["source"]["format"], "xlsx")
+            self.assertEqual(xlsx_output["result"]["summary"]["traits"], 2)
+
+        catalog = phenotype_catalog()
+        self.assertEqual({x["id"] for x in catalog["cotton_species"]}, {"cotton_upland", "cotton_barbadense", "cotton_herbaceum"})
+        self.assertTrue(any(x["code"] == "PD" and x["single_range"] is None for x in catalog["cotton_traits"]))
+
     def test_crop_presets_are_editable_and_traceable(self):
         crops = crop_catalog()
         crop_ids = {item["id"] for item in crops}
@@ -304,7 +354,7 @@ class CoreTests(unittest.TestCase):
                 time.sleep(0.02)
             self.assertEqual(current["status"], "complete", current.get("error"))
             names = {x["name"] for x in current["artifacts"]}
-            self.assertTrue({"report.html", "report_summary.json", "sample_metrics.tsv", "variant_metrics.tsv", "site_metric_summary.tsv", "density_windows.tsv", "module_availability.tsv", "recommend_filters.tsv", "sv_metrics.tsv", "group_batch_metrics.tsv", "subgenome_metrics.tsv", "fake_heterozygosity_windows.tsv", "annotation_consequences.tsv", "analysis_priorities.tsv", "score_dimensions.tsv", "warnings.tsv", "run_manifest.json", "CallVCF_QC_report.zip"}.issubset(names))
+            self.assertTrue({"report.html", "report_summary.json", "sample_metrics.tsv", "variant_metrics.tsv", "site_metric_summary.tsv", "density_windows.tsv", "module_availability.tsv", "recommend_filters.tsv", "sv_metrics.tsv", "group_batch_metrics.tsv", "subgenome_metrics.tsv", "fake_heterozygosity_windows.tsv", "annotation_consequences.tsv", "analysis_priorities.tsv", "score_dimensions.tsv", "warnings.tsv", "run_manifest.json", "GPA_Accelerator_VCF_QC_report.zip"}.issubset(names))
             self.assertTrue(manager.artifact(job["id"], "report.html").is_file())
 
     def test_sv_heterozygosity_uses_cohort_outliers(self):
