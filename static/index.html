@@ -107,6 +107,7 @@
         <button class="tab" data-tab="lead" role="tab">Lead 位点高级分析</button>
         <button class="tab" data-tab="sample-lead" role="tab">样本 Lead-SNP 画像</button>
         <button class="tab" data-tab="phenotype-qc" role="tab">表型质控与统计</button>
+        <button class="tab" data-tab="variant-phenotype" role="tab">位点 × 表型</button>
         <button class="tab" data-tab="quality" role="tab">VCF 质量评估</button>
       </div>
 
@@ -260,6 +261,59 @@
           </section>
         </div>
         <div id="phenotypeResult" class="result-body empty-state">尚未运行表型分析。</div>
+      </div>
+
+      <div class="tab-pane" id="pane-variant-phenotype">
+        <div class="pane-intro">
+          <div><h3>候选位点 × 精确表型 / 表型家族</h3><p>把 VCF 基因型与个体表型按材料 ID 对齐，比较 0/0、0/1、1/1，计算 ALT 剂量效应、ANOVA、Kruskal-Wallis 与 FDR。</p></div>
+          <button class="primary" id="variantPhenotypeRunBtn">开始关联分析</button>
+        </div>
+        <div class="quality-layout">
+          <section class="quality-config-card">
+            <h4>VCF、位点与表型文件</h4>
+            <div class="advanced-grid">
+              <label class="field span-2"><span>表型文件</span><div class="resource-input"><input id="associationPhenotypePath" type="text" placeholder="支持 XLSX、CSV、TSV、TXT、PS、PHEN、PHENO"><button class="secondary browse-resource" data-target="associationPhenotypePath" data-kind="phenotype_data">选择…</button></div></label>
+              <label class="field"><span>候选位点</span><input id="associationLocus" type="text" placeholder="24:73009658"></label>
+              <label class="field"><span>Excel工作表（可选）</span><input id="associationSheet" type="text" placeholder="留空读取第一个Sheet"></label>
+              <label class="field span-2"><span>报告输出目录</span><div class="resource-input"><input id="associationOutputDir" type="text" placeholder="留空使用本地默认目录"><button class="secondary browse-resource" data-target="associationOutputDir" data-kind="output_dir">选择…</button></div></label>
+            </div>
+            <div class="notice">VCF 使用页面最上方已载入的文件。普通单点验证由 GPA-Accelerator 直接完成，不要求安装 EMMAX。</div>
+          </section>
+
+          <section class="quality-config-card">
+            <h4>精确表型、前缀家族与合并方式</h4>
+            <div class="advanced-grid">
+              <label class="field"><span>表型名或前缀</span><input id="associationTraitQuery" type="text" placeholder="SPAD_MNS_23 或 SPAD"></label>
+              <label class="field"><span>匹配方式</span><select id="associationMatchMode"><option value="exact">精确环境/表型</option><option value="prefix">前缀家族：分开全部</option></select></label>
+              <label class="field"><span>年份筛选（长表可选）</span><input id="associationYearFilter" type="text" placeholder="例如 2023"></label>
+              <label class="field"><span>地点筛选（长表可选）</span><input id="associationLocationFilter" type="text" placeholder="例如 MNS"></label>
+              <label class="field"><span>综合所需最少环境比例</span><input id="associationCoverage" type="number" min="0.1" max="1" step="0.1" value="0.5"></label>
+              <label class="field"><span>每个基因型组建议样本数</span><input id="associationMinGroup" type="number" min="2" step="1" value="5"></label>
+            </div>
+            <div class="option-grid association-options">
+              <label class="check-option"><input id="associationCombine" type="checkbox" checked><span><b>生成合并分析</b><small>同时给出原值材料均值与按环境 z 标准化的综合指数</small></span></label>
+              <label class="check-option"><input id="associationReplicates" type="checkbox"><span><b>把 R1/R2/R3 也作为独立表型</b><small>默认优先使用 AV/AVG/MEAN，避免重复观测被重复加权</small></span></label>
+            </div>
+            <div class="notice"><b>示例：</b>精确输入 <code>SPAD_MNS_23</code> 会优先使用 <code>SPAD_MNS_23_AV</code>；前缀输入 <code>SPAD</code> 会分别分析各年各地的 SPAD 平均列，并额外计算两种综合结果。</div>
+          </section>
+
+          <section class="quality-config-card">
+            <h4>列名映射与 EMMAX 高级模型</h4>
+            <details class="resource-panel phenotype-mapping-panel">
+              <summary>列名映射（自动识别失败时填写）</summary>
+              <div class="threshold-grid">
+                <label class="field"><span>材料/样本列</span><input id="associationColSample" type="text" placeholder="ID / sample / IID"></label>
+                <label class="field"><span>性状列（长表）</span><input id="associationColTrait" type="text" placeholder="trait"></label>
+                <label class="field"><span>数值列（长表）</span><input id="associationColValue" type="text" placeholder="value"></label>
+                <label class="field"><span>年份列</span><input id="associationColYear" type="text" placeholder="year"></label>
+                <label class="field"><span>地点列</span><input id="associationColLocation" type="text" placeholder="location / env"></label>
+              </div>
+            </details>
+            <div class="tool-card emmax-card"><div><b>EMMAX 混合模型</b><small id="emmaxAssociationStatus">正在检查随包运行时…</small></div><button class="secondary install-tool" data-tool="emmax">部署/检查</button></div>
+            <p class="sub">官方 EMMAX Ubuntu x64 二进制已随完整安装包提供，采用 MIT 许可；Windows 通过 WSL 调用。它用于全基因组或批量位点的亲缘矩阵校正，当前单点快速验证不会强制调用。</p>
+          </section>
+        </div>
+        <div id="variantPhenotypeResult" class="result-body empty-state">尚未运行位点 × 表型关联分析。</div>
       </div>
 
       <div class="tab-pane" id="pane-quality">

@@ -16,6 +16,7 @@ from vcf_service import VCFError, create_service
 from advanced_analysis import AdvancedAnalyzer
 from quality_engine import QualityJobManager
 from phenotype_engine import PhenotypeAnalyzer
+from association_engine import VariantPhenotypeAnalyzer
 from repair_engine import RepairExecutor
 from tool_manager import install_tool, tools_status
 
@@ -27,6 +28,7 @@ ADVANCED = None
 QUALITY = None
 REPAIR = None
 PHENOTYPE = None
+ASSOCIATION = None
 
 
 def _windows_dialog(kind="file", initial_dir=None):
@@ -43,7 +45,7 @@ def _windows_dialog(kind="file", initial_dir=None):
         "bed": "BED regions|*.bed;*.bed.gz;*.tsv;*.txt|All files|*.*",
         "domain": "Domain table|*.tsv;*.csv;*.txt;*.gz|All files|*.*",
         "phenotype": "Phenotype PS|*.ps|All files|*.*",
-        "phenotype_data": "Phenotype data|*.xlsx;*.csv;*.tsv;*.txt|Excel workbook|*.xlsx|Delimited table|*.csv;*.tsv;*.txt|All files|*.*",
+        "phenotype_data": "Phenotype data|*.xlsx;*.csv;*.tsv;*.txt;*.ps;*.phen;*.pheno|Excel workbook|*.xlsx|Delimited table|*.csv;*.tsv;*.txt;*.ps;*.phen;*.pheno|All files|*.*",
         "reference": "Reference FASTA|*.fa;*.fasta;*.fna;*.fa.gz;*.fasta.gz|All files|*.*",
         "executable": "Executable|*.exe|All files|*.*",
         "file": "All files|*.*",
@@ -121,7 +123,7 @@ def select_resource(kind="file", initial_dir=None):
                 "bed": [("BED regions", "*.bed *.bed.gz *.tsv *.txt"), ("All files", "*.*")],
                 "domain": [("Domain table", "*.tsv *.csv *.txt *.gz"), ("All files", "*.*")],
                 "phenotype": [("Phenotype PS", "*.ps"), ("All files", "*.*")],
-                "phenotype_data": [("Phenotype data", "*.xlsx *.csv *.tsv *.txt"), ("Excel workbook", "*.xlsx"), ("Delimited table", "*.csv *.tsv *.txt"), ("All files", "*.*")],
+                "phenotype_data": [("Phenotype data", "*.xlsx *.csv *.tsv *.txt *.ps *.phen *.pheno"), ("Excel workbook", "*.xlsx"), ("Delimited table", "*.csv *.tsv *.txt *.ps *.phen *.pheno"), ("All files", "*.*")],
                 "executable": [("Executable", "*.exe *"), ("All files", "*.*")],
                 "reference": [("Reference FASTA", "*.fa *.fasta *.fna *.fa.gz *.fasta.gz"), ("All files", "*.*")],
             }
@@ -214,6 +216,21 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers(); self.wfile.write(body); return
             except VCFError as exc:
                 return self._json(404, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/variant-phenotype/artifact":
+            try:
+                query = parse_qs(parsed.query)
+                path = ASSOCIATION.artifact((query.get("run_id") or [""])[0], (query.get("name") or [""])[0])
+                body = path.read_bytes()
+                mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+                self.send_response(200)
+                self.send_header("Content-Type", mime + ("; charset=utf-8" if mime.startswith("text/") or mime in {"application/json", "image/svg+xml"} else ""))
+                disposition = "inline" if (query.get("view") or [""])[0] == "1" and path.suffix.lower() in {".html", ".svg"} else "attachment"
+                self.send_header("Content-Disposition", "{}; filename=\"{}\"".format(disposition, path.name))
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers(); self.wfile.write(body); return
+            except VCFError as exc:
+                return self._json(404, {"ok": False, "error": str(exc)})
         relative = "index.html" if parsed.path in {"", "/"} else unquote(parsed.path.lstrip("/"))
         candidate = (STATIC_DIR / relative).resolve()
         if STATIC_DIR not in candidate.parents and candidate != STATIC_DIR:
@@ -273,6 +290,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = QUALITY.start(payload)
             elif route == "/api/phenotype/analyze":
                 result = PHENOTYPE.analyze(payload)
+            elif route == "/api/variant-phenotype/analyze":
+                result = ASSOCIATION.analyze(payload)
             elif route == "/api/quality/status":
                 result = QUALITY.status(payload.get("run_id"))
             elif route == "/api/quality/cancel":
@@ -302,12 +321,13 @@ def main():
     parser.add_argument("--bcftools", default=os.environ.get("BCFTOOLS"))
     args = parser.parse_args()
 
-    global SERVICE, ADVANCED, QUALITY, REPAIR, PHENOTYPE
+    global SERVICE, ADVANCED, QUALITY, REPAIR, PHENOTYPE, ASSOCIATION
     SERVICE = create_service(args.bcftools)
     ADVANCED = AdvancedAnalyzer(SERVICE)
     QUALITY = QualityJobManager(SERVICE)
     REPAIR = RepairExecutor(SERVICE)
     PHENOTYPE = PhenotypeAnalyzer()
+    ASSOCIATION = VariantPhenotypeAnalyzer(SERVICE)
     server = AppServer((args.host, args.port), Handler)
     print("GPA-Accelerator: http://{}:{}".format(args.host, args.port), flush=True)
     try:

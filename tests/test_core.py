@@ -12,12 +12,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vcf_service import classify_variant, detect_compression, genotype_alleles, normalize_genotype, parse_loci
 from vcf_service import PurePythonVCFService
 from advanced_analysis import AdvancedAnalyzer, genotype_dosage, pairwise_r2, pairwise_dprime, parse_region, parse_trait_directions
-from tool_manager import tools_status
+from tool_manager import deploy_bundled_emmax, tools_status
 from quality_engine import QualityEvaluator, QualityJobManager, render_report, _svg_ld_decay, _svg_sample_qc, build_analysis_readiness
 from quality_profiles import crop_catalog, profile_catalog, resolve_profile
 from population_analysis import PopulationAnalyzer
 from repair_engine import RepairExecutor, _quality_comparison
 from phenotype_engine import PhenotypeAnalyzer, phenotype_catalog
+from association_engine import VariantPhenotypeAnalyzer
 
 
 def bgzf_block(data):
@@ -33,6 +34,81 @@ def bgzf_block(data):
 
 
 class CoreTests(unittest.TestCase):
+    def test_bundled_emmax_deploys_without_network(self):
+        with tempfile.TemporaryDirectory(prefix="gpa-emmax-tools-") as temp_name:
+            previous = os.environ.get("GPA_ACCELERATOR_TOOL_DIR")
+            os.environ["GPA_ACCELERATOR_TOOL_DIR"] = temp_name
+            try:
+                destination = deploy_bundled_emmax()
+                self.assertTrue((destination / "emmax-intel64").is_file())
+                self.assertTrue((destination / "emmax-kin-intel64").is_file())
+                self.assertTrue((destination / "LICENSE.txt").is_file())
+                status = tools_status()["emmax"]
+                self.assertTrue(status["installed"])
+                self.assertTrue(status["bundled"])
+                self.assertEqual(status["license"], "MIT")
+                self.assertEqual(
+                    status["archive_sha256"],
+                    "E2A582851BA1BE908757D4EF436E98AD76664A0C55E00D13E55FA35FE2BA54DD",
+                )
+            finally:
+                if previous is None:
+                    os.environ.pop("GPA_ACCELERATOR_TOOL_DIR", None)
+                else:
+                    os.environ["GPA_ACCELERATOR_TOOL_DIR"] = previous
+
+    def test_variant_phenotype_exact_prefix_combined_and_ps(self):
+        samples = [f"S{i:02d}" for i in range(1, 19)]
+        genotypes = ["0/0"] * 6 + ["0/1"] * 6 + ["1/1"] * 6
+        with tempfile.TemporaryDirectory(prefix="gpa-association-") as temp_name:
+            root = Path(temp_name)
+            vcf = root / "panel.vcf"
+            vcf.write_text(
+                "##fileformat=VCFv4.2\n##contig=<ID=24,length=100000000>\n"
+                "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t" + "\t".join(samples) + "\n"
+                "24\t73009658\trsTest\tC\tT\t60\tPASS\t.\tGT\t" + "\t".join(genotypes) + "\n",
+                encoding="utf-8",
+            )
+            phenotype = root / "phenotype.csv"
+            rows = ["ID,SPAD_22_AV,SPAD_23_AV,SPAD_MNS_23_AV,SPAD_MNS_23_R1,SPAD_MNS_23_R2,PH_23_AV"]
+            for index, (sample, gt) in enumerate(zip(samples, genotypes)):
+                dosage = {"0/0": 0, "0/1": 1, "1/1": 2}[gt]
+                noise = (index % 3 - 1) * .35
+                rows.append(f"{sample},{38+dosage*3+noise},{40+dosage*4-noise},{42+dosage*5+noise},{41+dosage*5},{43+dosage*5},{90+index*.2}")
+            phenotype.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            analyzer = VariantPhenotypeAnalyzer(PurePythonVCFService())
+            exact = analyzer.analyze({
+                "vcf_path": str(vcf), "phenotype_path": str(phenotype), "locus": "24:73009658",
+                "trait_query": "SPAD_MNS_23", "match_mode": "exact", "output_dir": str(root / "exact"),
+            })
+            self.assertEqual(exact["result"]["selected_traits"], ["SPAD_MNS_23_AV"])
+            exact_analysis = exact["result"]["variants"][0]["analyses"][0]
+            self.assertEqual(exact_analysis["n"], 18)
+            self.assertLess(exact_analysis["dosage_regression"]["pvalue"], 1e-6)
+            self.assertEqual([exact_analysis["genotype_groups"][key]["n"] for key in ("HOM_REF", "HET", "HOM_ALT")], [6, 6, 6])
+            artifact_names = {item["name"] for item in exact["artifacts"]}
+            self.assertIn("GPA_Accelerator_variant_phenotype_association.zip", artifact_names)
+
+            family = analyzer.analyze({
+                "vcf_path": str(vcf), "phenotype_path": str(phenotype), "locus": "24:73009658",
+                "trait_query": "SPAD", "match_mode": "prefix", "combine": True,
+                "output_dir": str(root / "family"),
+            })
+            self.assertEqual(set(family["result"]["selected_traits"]), {"SPAD_22_AV", "SPAD_23_AV", "SPAD_MNS_23_AV"})
+            kinds = [item["analysis_kind"] for item in family["result"]["variants"][0]["analyses"]]
+            self.assertEqual(kinds.count("separate"), 3)
+            self.assertIn("combined_raw", kinds)
+            self.assertIn("combined_z", kinds)
+
+            ps = root / "single.ps"
+            ps.write_text("\n".join(f"{sample} {42 + ({'0/0':0,'0/1':1,'1/1':2}[gt])*5 + (i%2)*.2}" for i, (sample, gt) in enumerate(zip(samples, genotypes))) + "\n", encoding="utf-8")
+            ps_result = analyzer.analyze({
+                "vcf_path": str(vcf), "phenotype_path": str(ps), "locus": "24:73009658",
+                "trait_query": "single", "match_mode": "exact", "output_dir": str(root / "ps"),
+            })
+            self.assertEqual(ps_result["result"]["summary"]["matched_samples"], 18)
+            self.assertTrue(ps_result["result"]["input"]["phenotype_source"]["header_inferred"])
+
     def test_phenotype_qc_blue_blup_outliers_and_artifacts(self):
         rows = ["sample,trait,value,year,location,latitude,longitude,replicate,group"]
         for sample_index, sample in enumerate(("C1", "C2", "C3", "C4")):

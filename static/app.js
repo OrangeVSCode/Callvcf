@@ -1,4 +1,4 @@
-const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null, phenotypeResult: null, qualityCatalog: null, qualityRun: null, qualityPoll: null, qcRecommendation: null, repairCatalog: null, repairPlan: null, repairPoll: null, repairCompleted: false, applyingCropPreset: false };
+const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null, phenotypeResult: null, associationResult: null, qualityCatalog: null, qualityRun: null, qualityPoll: null, qcRecommendation: null, repairCatalog: null, repairPlan: null, repairPoll: null, repairCompleted: false, applyingCropPreset: false };
 const $ = (id) => document.getElementById(id);
 const categoryOrder = ["HOM_REF", "HET", "HOM_ALT", "MISSING", "OTHER"];
 const shortLabels = { HOM_REF: "0/0", HET: "0/1", HOM_ALT: "1/1", MISSING: "缺失", OTHER: "其他" };
@@ -543,14 +543,15 @@ async function browseResource(button) {
 
 function renderToolStatus(data) {
   state.tools = data;
-  const plink = data.plink, ldb = data.ldblockshow, bcf = data.bcftools;
+  const plink = data.plink, ldb = data.ldblockshow, bcf = data.bcftools, emmax = data.emmax;
   $("plinkStatus").textContent = plink.installed ? `已就绪 · ${plink.path}` : `未安装 · ${plink.bundled_version}`;
   $("ldblockshowStatus").textContent = ldb.installed ? (ldb.requires_wsl && !ldb.wsl_available ? `已下载 · 需先安装 WSL` : `已就绪 · ${ldb.path}`) : (ldb.requires_wsl && !ldb.wsl_available ? "未安装 · 需先启用 WSL" : "未安装");
   $("bcftoolsStatus").textContent = bcf.installed ? `已就绪 · ${bcf.path}` : (bcf.requires_wsl && !bcf.wsl_available ? "需先完成 Ubuntu/WSL 初始化" : "未安装 · 可一键安装");
-  $("toolRoot").textContent = `工具目录：${data.tool_root}；PLINK GPL-3.0，LDBlockShow MIT，bcftools MIT/Expat（部分插件GPL）。`;
+  if ($("emmaxAssociationStatus")) $("emmaxAssociationStatus").textContent = emmax.ready ? `已就绪 · ${emmax.version}` : emmax.installed ? "已随包部署 · 完成 WSL/Ubuntu 初始化后可运行" : emmax.bundled ? "随安装包提供 · 点击部署" : "当前安装包未包含 EMMAX";
+  $("toolRoot").textContent = `工具目录：${data.tool_root}；PLINK GPL-3.0，LDBlockShow MIT，bcftools MIT/Expat（部分插件GPL），EMMAX MIT。`;
   document.querySelectorAll(".install-tool").forEach(button => {
     const installed = data[button.dataset.tool]?.installed;
-    button.textContent = installed ? "重新安装" : "一键安装";
+    button.textContent = button.dataset.tool === "emmax" ? (installed ? "重新部署" : "部署/检查") : (installed ? "重新安装" : "一键安装");
   });
   if (ldb.installed && !$("ldblockshowPath").value.trim()) $("ldblockshowPath").value = ldb.path;
   if (data.platform === "Windows" && ldb.installed) $("ldblockshowWsl").checked = true;
@@ -563,7 +564,7 @@ async function loadToolStatus() {
     if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
     renderToolStatus(result.data);
   } catch (error) {
-    $("plinkStatus").textContent = "检测失败"; $("ldblockshowStatus").textContent = "检测失败"; $("bcftoolsStatus").textContent = "检测失败";
+    $("plinkStatus").textContent = "检测失败"; $("ldblockshowStatus").textContent = "检测失败"; $("bcftoolsStatus").textContent = "检测失败"; if ($("emmaxAssociationStatus")) $("emmaxAssociationStatus").textContent = "检测失败";
   }
 }
 
@@ -572,7 +573,7 @@ async function installTool(button) {
   button.disabled = true; button.textContent = "正在下载…";
   try {
     const result = await api("/api/tools/install", {tool});
-    renderToolStatus(result); toast(`${tool === "plink" ? "PLINK" : tool === "bcftools" ? "bcftools" : "LDBlockShow"} 安装完成`);
+    renderToolStatus(result); toast(`${tool === "plink" ? "PLINK" : tool === "bcftools" ? "bcftools" : tool === "emmax" ? "EMMAX" : "LDBlockShow"} ${tool === "emmax" ? "部署完成" : "安装完成"}`);
   } catch (error) { toast(error.message, true); button.textContent = oldText; }
   finally { button.disabled = false; }
 }
@@ -1289,6 +1290,68 @@ async function runPhenotypeAnalysis() {
   } finally { clearLoading(target, button); }
 }
 
+function associationNumber(value, digits = 4) {
+  if (value == null || !Number.isFinite(Number(value))) return "—";
+  const number = Number(value);
+  if (number !== 0 && Math.abs(number) < 0.001) return number.toExponential(3);
+  return number.toFixed(digits).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function renderVariantPhenotypeResult(data) {
+  const result = data.result, summary = result.summary, artifacts = data.artifacts || [];
+  const report = artifacts.find(item => item.name === "variant_phenotype_report.html");
+  const archive = artifacts.find(item => item.name.endsWith("variant_phenotype_association.zip"));
+  const plot = artifacts.find(item => item.name === "genotype_phenotype_plot.svg");
+  const rows = [];
+  (result.variants || []).forEach(variant => (variant.analyses || []).forEach(item => {
+    const groups = item.genotype_groups || {}, regression = item.dosage_regression || {}, anova = item.anova || {}, kw = item.kruskal_wallis || {};
+    const groupText = ["HOM_REF","HET","HOM_ALT"].map(group => `${shortLabels[group]} n=${groups[group]?.n || 0}, μ=${associationNumber(groups[group]?.mean, 3)}`).join("<br>");
+    rows.push(`<tr><td><b>${escapeHtml(item.trait)}</b><small>${escapeHtml(item.analysis_kind)}</small></td><td>${formatNumber(item.n)}</td><td>${groupText}</td><td>${associationNumber(regression.slope)}</td><td>${associationNumber(regression.standardized_beta)}</td><td>${associationNumber(regression.pvalue)}</td><td>${associationNumber(item.fdr_qvalue)}</td><td>${associationNumber(anova.pvalue)}</td><td>${associationNumber(kw.pvalue)}</td><td>${associationNumber(anova.eta_squared)}</td><td>${item.low_power_warning ? '<span class="status-bad">低功效</span>' : '<span class="status-good">可解释</span>'}</td></tr>`);
+  }));
+  const best = result.best_association;
+  const warningList = (result.warnings || []).map(item => `<li>${escapeHtml(item)}</li>`).join("") || "<li>未触发额外警告。</li>";
+  const links = artifacts.map(item => `<a class="artifact-link" href="${escapeHtml(item.url)}">${escapeHtml(item.name)}</a>`).join("");
+  $("variantPhenotypeResult").className = "result-body";
+  $("variantPhenotypeResult").innerHTML = `
+    <div class="readiness-banner ${summary.matched_fraction >= .8 ? "ready" : "caution"}"><b>${escapeHtml(result.query.locus)} 已完成位点 × 表型分析</b><span>材料按 ID 对齐；每个表型内的重复先按材料取平均，不把重复当成独立样本。</span></div>
+    <div class="quality-summary"><div class="meta-card"><span>VCF材料</span><strong>${formatNumber(summary.vcf_samples)}</strong></div><div class="meta-card"><span>匹配材料</span><strong>${formatNumber(summary.matched_samples)}</strong><small>${formatPercent(summary.matched_fraction)}</small></div><div class="meta-card"><span>分开表型</span><strong>${formatNumber(summary.selected_traits)}</strong></div><div class="meta-card"><span>统计分析</span><strong>${formatNumber(summary.analyses)}</strong></div><div class="meta-card"><span>最佳剂量P</span><strong>${best ? associationNumber(best.pvalue) : "—"}</strong><small>${best ? escapeHtml(best.trait) : "不可计算"}</small></div></div>
+    <div class="handoff-bar"><strong>报告与完整结果</strong>${report ? `<a class="artifact-link" target="_blank" rel="noopener" href="${escapeHtml(report.view_url)}">打开HTML报告</a>` : ""}${archive ? `<a class="artifact-link" href="${escapeHtml(archive.url)}">下载完整ZIP</a>` : ""}</div>
+    <section class="quality-section"><h4>实际匹配的表型列</h4><div class="chip-list">${(result.selected_traits || []).map(item => `<span class="variant-badge">${escapeHtml(item)}</span>`).join("")}</div><p class="sub">精确模式优先使用 AV/AVG/MEAN；前缀模式默认排除 R1/R2/R3，除非勾选重复列。</p></section>
+    ${plot ? `<section class="quality-section"><h4>三种基因型的表型均值与95%置信区间</h4><div class="association-chart-preview"><img src="${escapeHtml(plot.view_url)}" alt="位点与表型关联图"></div></section>` : ""}
+    <section class="quality-section"><h4>分开与合并关联统计</h4><div class="table-wrap"><table><thead><tr><th>表型</th><th>N</th><th>基因型组</th><th>ALT剂量效应</th><th>标准化β</th><th>剂量P</th><th>FDR</th><th>ANOVA P</th><th>K-W P</th><th>η²</th><th>功效</th></tr></thead><tbody>${rows.join("")}</tbody></table></div></section>
+    <section class="quality-section"><h4>解释警告</h4><ul>${warningList}</ul><p class="sub">显著性不是因果证明；全基因组检验或明显群体结构数据应再使用 EMMAX 的 kinship/协变量混合模型复核。</p></section>
+    <section class="quality-section"><h4>结果文件</h4><div class="artifact-list">${links}</div><p class="sub">输出目录：${escapeHtml(data.run_dir)}</p></section>`;
+}
+
+async function runVariantPhenotypeAnalysis() {
+  const button = $("variantPhenotypeRunBtn"), target = $("variantPhenotypeResult");
+  const phenotypePath = $("associationPhenotypePath").value.trim();
+  const locus = $("associationLocus").value.trim() || lociText(false).split(/[\s,;]+/).find(Boolean) || "";
+  if (!phenotypePath) return toast("请选择表型文件", true);
+  if (!locus) return toast("请输入候选位点，例如 24:73009658", true);
+  if (!$("associationTraitQuery").value.trim()) return toast("请输入精确表型名或表型前缀", true);
+  const columnIds = {sample:"associationColSample", trait:"associationColTrait", value:"associationColValue", year:"associationColYear", location:"associationColLocation"};
+  const columns = {};
+  Object.entries(columnIds).forEach(([key,id]) => { const value=$(id).value.trim(); if(value) columns[key]=value; });
+  setLoading(target, button, "正在读取表型、对齐材料并计算基因型关联；无索引大VCF可能需要顺序扫描…");
+  try {
+    const data = await api("/api/variant-phenotype/analyze", {
+      vcf_path: currentPath(), phenotype_path: phenotypePath, locus,
+      trait_query: $("associationTraitQuery").value.trim(), match_mode: $("associationMatchMode").value,
+      sheet: $("associationSheet").value.trim(), output_dir: $("associationOutputDir").value.trim(), columns,
+      year_filter: $("associationYearFilter").value.trim(), location_filter: $("associationLocationFilter").value.trim(),
+      include_replicates: $("associationReplicates").checked, combine: $("associationCombine").checked,
+      min_trait_coverage: phenotypeNumber("associationCoverage", .5), min_group_size: phenotypeNumber("associationMinGroup", 5),
+    });
+    state.associationResult = data;
+    localStorage.setItem("gpaAssociationPhenotypePath", phenotypePath);
+    renderVariantPhenotypeResult(data);
+    toast(`关联分析完成：匹配 ${formatNumber(data.result.summary.matched_samples)} 个材料，${formatNumber(data.result.summary.analyses)} 项统计`);
+  } catch (error) {
+    target.className = "result-body empty-state"; target.textContent = error.message; toast(error.message, true);
+  } finally { clearLoading(target, button); }
+}
+
 function initEvents() {
   $("selectFileBtn").addEventListener("click", selectLocalFile);
   $("shutdownBtn").addEventListener("click", shutdownLocal);
@@ -1308,6 +1371,7 @@ function initEvents() {
   $("leadRunBtn").addEventListener("click", runLeadAnalysis);
   $("sampleLeadRunBtn").addEventListener("click", runSampleLeadProfile);
   $("phenotypeRunBtn").addEventListener("click", runPhenotypeAnalysis);
+  $("variantPhenotypeRunBtn").addEventListener("click", runVariantPhenotypeAnalysis);
   $("qualityRunBtn").addEventListener("click", runQualityAssessment);
   $("qualityCancelBtn").addEventListener("click", cancelQualityAssessment);
   $("qualityCrop").addEventListener("change", applyCropPreset);
@@ -1363,6 +1427,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (saved) $("vcfPath").value = saved;
   const savedPhenotype = localStorage.getItem("gpaPhenotypePath");
   if (savedPhenotype) $("phenotypeDataPath").value = savedPhenotype;
+  const savedAssociationPhenotype = localStorage.getItem("gpaAssociationPhenotypePath");
+  if (savedAssociationPhenotype) $("associationPhenotypePath").value = savedAssociationPhenotype;
   initEvents();
   restoreAdvancedSettings();
   loadToolStatus();

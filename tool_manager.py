@@ -8,6 +8,7 @@ import platform
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import urllib.request
 import zipfile
@@ -22,6 +23,9 @@ PLINK_URLS = {
     "Linux": "https://s3.amazonaws.com/plink1-assets/plink_linux_x86_64_20250819.zip",
 }
 LDBLOCKSHOW_URL = "https://codeload.github.com/hewm2008/LDBlockShow/zip/refs/heads/main"
+EMMAX_VERSION = "emmax-intel64-20120205 / binary distribution 20120210"
+EMMAX_ARCHIVE_SHA256 = "E2A582851BA1BE908757D4EF436E98AD76664A0C55E00D13E55FA35FE2BA54DD"
+RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 
 
 def tool_root():
@@ -94,6 +98,46 @@ def resolve_ldblockshow(explicit=None):
     return shutil.which("LDBlockShow")
 
 
+def bundled_emmax_dir():
+    return (RESOURCE_ROOT / "vendor" / "emmax").resolve()
+
+
+def deploy_bundled_emmax():
+    source = bundled_emmax_dir()
+    required = (source / "emmax-intel64", source / "emmax-kin-intel64", source / "LICENSE.txt")
+    if not all(path.is_file() for path in required):
+        raise VCFError("安装包中缺少 EMMAX 运行文件；请重新下载完整安装包")
+    destination = tool_root() / "emmax"
+    destination.mkdir(parents=True, exist_ok=True)
+    for source_path in required + (source / "README.txt",):
+        if source_path.is_file():
+            target = destination / source_path.name
+            if not target.is_file() or target.stat().st_size != source_path.stat().st_size:
+                shutil.copy2(source_path, target)
+            if not target.suffix:
+                target.chmod(target.stat().st_mode | stat.S_IEXEC)
+    _write_metadata("emmax", {
+        "source": "https://csg.sph.umich.edu/kang/emmax/download/index.html",
+        "distribution": "emmax-intel-binary-20120210.tar.gz",
+        "version": EMMAX_VERSION, "archive_sha256": EMMAX_ARCHIVE_SHA256,
+        "license": "MIT", "platform": "Ubuntu x86_64 via WSL on Windows",
+    })
+    return destination
+
+
+def resolve_emmax():
+    installed = tool_root() / "emmax" / "emmax-intel64"
+    kin = tool_root() / "emmax" / "emmax-kin-intel64"
+    if installed.is_file() and kin.is_file():
+        return {"emmax": str(installed), "kin": str(kin)}
+    if platform.system() != "Windows":
+        command = shutil.which("emmax-intel64") or shutil.which("emmax")
+        kin_command = shutil.which("emmax-kin-intel64") or shutil.which("emmax-kin")
+        if command and kin_command:
+            return {"emmax": command, "kin": kin_command}
+    return None
+
+
 def _probe(command, args):
     if not command:
         return None
@@ -141,6 +185,14 @@ def tools_status():
     wsl_installed = _wsl_operational() if system == "Windows" else False
     native_bcftools = shutil.which("bcftools")
     wsl_bcftools = _wsl_bcftools_path()
+    emmax = resolve_emmax()
+    bundled_emmax = all((bundled_emmax_dir() / name).is_file() for name in ("emmax-intel64", "emmax-kin-intel64", "LICENSE.txt"))
+    if bundled_emmax and not emmax and getattr(sys, "frozen", False):
+        try:
+            deploy_bundled_emmax()
+            emmax = resolve_emmax()
+        except (OSError, VCFError):
+            pass
     return {
         "tool_root": str(tool_root()), "platform": system,
         "plink": {"installed": bool(plink), "path": plink, "version": _probe(plink, ["--version"]),
@@ -157,6 +209,16 @@ def tools_status():
             "requires_wsl": system == "Windows" and not native_bcftools,
             "wsl_available": wsl_installed,
             "install_mode": "WSL apt managed runtime" if system == "Windows" else "system package",
+        },
+        "emmax": {
+            "installed": bool(emmax), "bundled": bundled_emmax,
+            "ready": bool(emmax) and (system != "Windows" or wsl_installed),
+            "path": emmax["emmax"] if emmax else None,
+            "kin_path": emmax["kin"] if emmax else None,
+            "version": EMMAX_VERSION, "license": "MIT",
+            "requires_wsl": system == "Windows", "wsl_available": wsl_installed,
+            "install_mode": "随安装包部署；Windows 通过 WSL 调用" if system == "Windows" else "随安装包部署",
+            "archive_sha256": EMMAX_ARCHIVE_SHA256,
         },
     }
 
@@ -228,6 +290,8 @@ def install_tool(name):
                 "source": "Ubuntu apt repositories", "package": "bcftools + tabix",
                 "license": "MIT/Expat（部分插件GPL）", "backend": "WSL",
             })
+        elif name == "emmax":
+            deploy_bundled_emmax()
         else:
             raise VCFError("无法识别的工具：{}".format(name))
     return tools_status()

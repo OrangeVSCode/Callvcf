@@ -204,6 +204,9 @@ summary { padding: 10px 16px; color: var(--brand); font-size: 12px; font-weight:
 .phenotype-mapping-panel { margin-top: 14px; }
 .phenotype-chart-preview { overflow: auto; border: 1px solid var(--line); border-radius: 12px; background: white; }
 .phenotype-chart-preview img { display: block; width: 100%; min-width: 680px; height: auto; }
+.association-chart-preview { overflow-x: auto; border: 1px solid var(--line); border-radius: 16px; background: #fbfdfb; padding: 10px; }
+.association-chart-preview img { display: block; width: 100%; min-width: 760px; height: auto; }
+.association-options, .emmax-card { margin-top: 16px; }
 .artifact-link { cursor: pointer; }
 .lead-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
 .lead-summary .meta-card strong { white-space: normal; overflow-wrap: anywhere; }
