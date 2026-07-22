@@ -3,21 +3,77 @@ import argparse
 import json
 import mimetypes
 import os
+import shutil
+import subprocess
 import sys
 import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from vcf_service import VCFError, create_service
 from advanced_analysis import AdvancedAnalyzer
+from quality_engine import QualityJobManager
+from phenotype_engine import PhenotypeAnalyzer
+from association_engine import VariantPhenotypeAnalyzer
+from emmax_engine import EmmaxJobManager
+from repair_engine import RepairExecutor
+from similarity_engine import SimilarityJobManager
+from tool_manager import install_tool, tools_status
 
 
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 STATIC_DIR = ROOT / "static"
 SERVICE = None
 ADVANCED = None
+QUALITY = None
+REPAIR = None
+PHENOTYPE = None
+ASSOCIATION = None
+EMMAX = None
+SIMILARITY = None
+
+
+def _windows_dialog(kind="file", initial_dir=None):
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        raise VCFError("当前环境缺少tkinter和Windows文件选择器；请直接粘贴路径")
+    env = os.environ.copy()
+    env["CALLVCF_DIALOG_INITIAL"] = str(initial_dir or "")
+    filters = {
+        "vcf": "Variant files|*.vcf;*.vcf.gz;*.vcf.bgz;*.bcf|All files|*.*",
+        "gff": "Gene annotation|*.gff;*.gff3;*.gtf;*.gff.gz;*.gff3.gz;*.gtf.gz|All files|*.*",
+        "annotation": "Annotation table|*.tsv;*.csv;*.txt;*.gz|All files|*.*",
+        "sample_meta": "Sample metadata|*.tsv;*.csv;*.txt|All files|*.*",
+        "bed": "BED regions|*.bed;*.bed.gz;*.tsv;*.txt|All files|*.*",
+        "domain": "Domain table|*.tsv;*.csv;*.txt;*.gz|All files|*.*",
+        "phenotype": "Phenotype PS|*.ps|All files|*.*",
+        "phenotype_data": "Phenotype data|*.xlsx;*.csv;*.tsv;*.txt;*.ps;*.phen;*.pheno|Excel workbook|*.xlsx|Delimited table|*.csv;*.tsv;*.txt;*.ps;*.phen;*.pheno|All files|*.*",
+        "reference": "Reference FASTA|*.fa;*.fasta;*.fna;*.fa.gz;*.fasta.gz|All files|*.*",
+        "executable": "Executable|*.exe|All files|*.*",
+        "file": "All files|*.*",
+        "kin0": "KING kinship table|*.kin0;*.txt;*.tsv|All files|*.*",
+    }
+    if kind in {"directory", "phenotype_dir", "output_dir"}:
+        script = "$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Windows.Forms;$d=New-Object System.Windows.Forms.FolderBrowserDialog;if($env:CALLVCF_DIALOG_INITIAL){$d.SelectedPath=$env:CALLVCF_DIALOG_INITIAL};if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){[Console]::OutputEncoding=[Text.Encoding]::UTF8;$d.SelectedPath}"
+    elif kind == "repair_output":
+        env["CALLVCF_DIALOG_FILTER"] = "Compressed VCF|*.vcf.gz|BGZF VCF|*.vcf.bgz"
+        script = "$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Windows.Forms;$d=New-Object System.Windows.Forms.SaveFileDialog;$d.Filter=$env:CALLVCF_DIALOG_FILTER;$d.DefaultExt='vcf.gz';$d.AddExtension=$true;$d.OverwritePrompt=$true;if($env:CALLVCF_DIALOG_INITIAL){$d.InitialDirectory=$env:CALLVCF_DIALOG_INITIAL};if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){[Console]::OutputEncoding=[Text.Encoding]::UTF8;$d.FileName}"
+    else:
+        env["CALLVCF_DIALOG_FILTER"] = filters.get(kind, filters["file"])
+        script = "$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Windows.Forms;$d=New-Object System.Windows.Forms.OpenFileDialog;$d.Filter=$env:CALLVCF_DIALOG_FILTER;$d.Multiselect=$false;if($env:CALLVCF_DIALOG_INITIAL){$d.InitialDirectory=$env:CALLVCF_DIALOG_INITIAL};if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){[Console]::OutputEncoding=[Text.Encoding]::UTF8;$d.FileName}"
+    try:
+        proc = subprocess.run(
+            [powershell, "-NoProfile", "-STA", "-Command", script], env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        raise VCFError("文件选择窗口等待超时")
+    if proc.returncode:
+        raise VCFError((proc.stderr or "Windows文件选择器启动失败").strip()[-1000:])
+    return proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else None
 
 
 def select_local_file(initial_dir=None):
@@ -25,7 +81,7 @@ def select_local_file(initial_dir=None):
         import tkinter as tk
         from tkinter import filedialog
     except ImportError:
-        raise VCFError("当前 Python 未包含 tkinter；请直接粘贴 VCF 文件路径")
+        return {"path": _windows_dialog("vcf", initial_dir)}
     root = tk.Tk()
     root.withdraw()
     try:
@@ -51,7 +107,7 @@ def select_resource(kind="file", initial_dir=None):
         import tkinter as tk
         from tkinter import filedialog
     except ImportError:
-        raise VCFError("当前 Python 未包含 tkinter，请直接粘贴资源路径")
+        return {"path": _windows_dialog(kind, initial_dir)}
     root = tk.Tk()
     root.withdraw()
     try:
@@ -59,13 +115,23 @@ def select_resource(kind="file", initial_dir=None):
         kwargs = {"initialdir": initial_dir if initial_dir and Path(initial_dir).is_dir() else None}
         if kind in {"directory", "phenotype_dir", "output_dir"}:
             path = filedialog.askdirectory(title="选择目录", **kwargs)
+        elif kind == "repair_output":
+            path = filedialog.asksaveasfilename(
+                title="选择新的VCF.GZ输出（不会覆盖已有文件）", defaultextension=".vcf.gz",
+                filetypes=[("Compressed VCF", "*.vcf.gz"), ("BGZF VCF", "*.vcf.bgz")], **kwargs
+            )
         else:
             filters = {
                 "gff": [("Gene annotation", "*.gff *.gff3 *.gtf *.gff.gz *.gff3.gz *.gtf.gz"), ("All files", "*.*")],
                 "annotation": [("Annotation table", "*.tsv *.csv *.txt *.gz"), ("All files", "*.*")],
+                "sample_meta": [("Sample metadata", "*.tsv *.csv *.txt"), ("All files", "*.*")],
+                "bed": [("BED regions", "*.bed *.bed.gz *.tsv *.txt"), ("All files", "*.*")],
                 "domain": [("Domain table", "*.tsv *.csv *.txt *.gz"), ("All files", "*.*")],
                 "phenotype": [("Phenotype PS", "*.ps"), ("All files", "*.*")],
+                "phenotype_data": [("Phenotype data", "*.xlsx *.csv *.tsv *.txt *.ps *.phen *.pheno"), ("Excel workbook", "*.xlsx"), ("Delimited table", "*.csv *.tsv *.txt *.ps *.phen *.pheno"), ("All files", "*.*")],
                 "executable": [("Executable", "*.exe *"), ("All files", "*.*")],
+                "reference": [("Reference FASTA", "*.fa *.fasta *.fna *.fa.gz *.fasta.gz"), ("All files", "*.*")],
+                "kin0": [("KING kinship table", "*.kin0 *.txt *.tsv"), ("All files", "*.*")],
             }
             path = filedialog.askopenfilename(title="选择资源文件", filetypes=filters.get(kind, [("All files", "*.*")]), **kwargs)
     finally:
@@ -79,7 +145,7 @@ class AppServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "VCFQueryTool/1.0"
+    server_version = "GPA-Accelerator/1.0"
 
     def log_message(self, fmt, *args):
         sys.stdout.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
@@ -112,10 +178,92 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/health":
             return self._json(200, {
                 "ok": True,
-                "service": "VCF Query Tool",
+                "service": "GPA-Accelerator",
                 "backend": getattr(SERVICE, "backend", "bcftools"),
                 "bcftools": SERVICE.bcftools,
             })
+        if parsed.path == "/api/tools/status":
+            return self._json(200, {"ok": True, "data": tools_status()})
+        if parsed.path == "/api/quality/catalog":
+            return self._json(200, {"ok": True, "data": QUALITY.catalog()})
+        if parsed.path == "/api/phenotype/catalog":
+            return self._json(200, {"ok": True, "data": PHENOTYPE.catalog()})
+        if parsed.path == "/api/similarity/catalog":
+            return self._json(200, {"ok": True, "data": SIMILARITY.catalog()})
+        if parsed.path == "/api/repair/catalog":
+            return self._json(200, {"ok": True, "data": REPAIR.catalog()})
+        if parsed.path == "/api/quality/artifact":
+            try:
+                query = parse_qs(parsed.query)
+                path = QUALITY.artifact((query.get("run_id") or [""])[0], (query.get("name") or [""])[0])
+                body = path.read_bytes()
+                mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+                self.send_response(200)
+                self.send_header("Content-Type", mime + ("; charset=utf-8" if mime.startswith("text/") or mime == "application/json" else ""))
+                disposition = "inline" if (query.get("view") or [""])[0] == "1" and path.suffix.lower() == ".html" else "attachment"
+                self.send_header("Content-Disposition", "{}; filename=\"{}\"".format(disposition, path.name))
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            except VCFError as exc:
+                return self._json(404, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/phenotype/artifact":
+            try:
+                query = parse_qs(parsed.query)
+                path = PHENOTYPE.artifact((query.get("run_id") or [""])[0], (query.get("name") or [""])[0])
+                body = path.read_bytes()
+                mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+                self.send_response(200)
+                self.send_header("Content-Type", mime + ("; charset=utf-8" if mime.startswith("text/") or mime in {"application/json", "image/svg+xml"} else ""))
+                disposition = "inline" if (query.get("view") or [""])[0] == "1" and path.suffix.lower() in {".html", ".svg"} else "attachment"
+                self.send_header("Content-Disposition", "{}; filename=\"{}\"".format(disposition, path.name))
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers(); self.wfile.write(body); return
+            except VCFError as exc:
+                return self._json(404, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/variant-phenotype/artifact":
+            try:
+                query = parse_qs(parsed.query)
+                path = ASSOCIATION.artifact((query.get("run_id") or [""])[0], (query.get("name") or [""])[0])
+                body = path.read_bytes()
+                mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+                self.send_response(200)
+                self.send_header("Content-Type", mime + ("; charset=utf-8" if mime.startswith("text/") or mime in {"application/json", "image/svg+xml"} else ""))
+                disposition = "inline" if (query.get("view") or [""])[0] == "1" and path.suffix.lower() in {".html", ".svg"} else "attachment"
+                self.send_header("Content-Disposition", "{}; filename=\"{}\"".format(disposition, path.name))
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers(); self.wfile.write(body); return
+            except VCFError as exc:
+                return self._json(404, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/emmax/artifact":
+            try:
+                query = parse_qs(parsed.query)
+                name = (query.get("name") or [""])[0]
+                path = EMMAX.artifact((query.get("run_id") or [""])[0], name)
+                body = path.read_bytes()
+                mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+                self.send_response(200)
+                self.send_header("Content-Type", mime + ("; charset=utf-8" if mime.startswith("text/") or mime in {"application/json", "image/svg+xml"} else ""))
+                disposition = "inline" if (query.get("view") or [""])[0] == "1" and path.suffix.lower() in {".html", ".svg"} else "attachment"
+                self.send_header("Content-Disposition", "{}; filename=\"{}\"".format(disposition, path.name))
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers(); self.wfile.write(body); return
+            except VCFError as exc:
+                return self._json(404, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/similarity/artifact":
+            try:
+                query = parse_qs(parsed.query); name=(query.get("name") or [""])[0]
+                path=SIMILARITY.artifact((query.get("run_id") or [""])[0],name); body=path.read_bytes(); mime=mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+                self.send_response(200); self.send_header("Content-Type",mime+("; charset=utf-8" if mime.startswith("text/") or mime in {"application/json","image/svg+xml"} else ""))
+                disposition="inline" if (query.get("view") or [""])[0]=="1" and path.suffix.lower() in {".html",".svg"} else "attachment"
+                self.send_header("Content-Disposition",'{}; filename="{}"'.format(disposition,path.name)); self.send_header("Content-Length",str(len(body))); self.send_header("Cache-Control","no-store"); self.end_headers(); self.wfile.write(body); return
+            except VCFError as exc:
+                return self._json(404,{"ok":False,"error":str(exc)})
         relative = "index.html" if parsed.path in {"", "/"} else unquote(parsed.path.lstrip("/"))
         candidate = (STATIC_DIR / relative).resolve()
         if STATIC_DIR not in candidate.parents and candidate != STATIC_DIR:
@@ -141,7 +289,7 @@ class Handler(BaseHTTPRequestHandler):
             elif route == "/api/select-resource":
                 result = select_resource(payload.get("kind", "file"), payload.get("initial_dir"))
             elif route == "/api/shutdown":
-                result = {"message": "CallVCF 正在关闭"}
+                result = {"message": "GPA-Accelerator 正在关闭"}
                 self._json(200, {"ok": True, "data": result})
                 threading.Timer(0.2, self.server.shutdown).start()
                 return
@@ -149,6 +297,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = SERVICE.discover(payload.get("root"), max_depth=int(payload.get("max_depth", 5)))
             elif route == "/api/inspect":
                 result = SERVICE.inspect(payload.get("path"), force=bool(payload.get("force")))
+            elif route == "/api/count-records":
+                result = SERVICE.count_records(payload.get("path"))
             elif route == "/api/check":
                 result = SERVICE.check_loci(payload.get("path"), payload.get("loci"))
             elif route == "/api/distribution":
@@ -163,6 +313,42 @@ class Handler(BaseHTTPRequestHandler):
                 )
             elif route == "/api/lead-analysis":
                 result = ADVANCED.analyze(payload)
+            elif route == "/api/sample-lead-profile":
+                result = ADVANCED.sample_lead_profile(payload)
+            elif route == "/api/tools/install":
+                result = install_tool(payload.get("tool"))
+                if str(payload.get("tool") or "").lower() == "bcftools":
+                    REPAIR.refresh_backend()
+            elif route == "/api/quality/start":
+                result = QUALITY.start(payload)
+            elif route == "/api/phenotype/analyze":
+                result = PHENOTYPE.analyze(payload)
+            elif route == "/api/variant-phenotype/analyze":
+                result = ASSOCIATION.analyze(payload)
+            elif route == "/api/emmax/start":
+                result = EMMAX.start(payload)
+            elif route == "/api/emmax/status":
+                result = EMMAX.status(payload.get("run_id"))
+            elif route == "/api/emmax/cancel":
+                result = EMMAX.cancel(payload.get("run_id"))
+            elif route == "/api/similarity/start":
+                result = SIMILARITY.start(payload)
+            elif route == "/api/similarity/status":
+                result = SIMILARITY.status(payload.get("run_id"))
+            elif route == "/api/similarity/cancel":
+                result = SIMILARITY.cancel(payload.get("run_id"))
+            elif route == "/api/quality/status":
+                result = QUALITY.status(payload.get("run_id"))
+            elif route == "/api/quality/cancel":
+                result = QUALITY.cancel(payload.get("run_id"))
+            elif route == "/api/repair/plan":
+                result = REPAIR.plan(payload)
+            elif route == "/api/repair/execute":
+                result = REPAIR.execute(payload)
+            elif route == "/api/repair/status":
+                result = REPAIR.status(payload.get("plan_id"))
+            elif route == "/api/repair/cancel":
+                result = REPAIR.cancel(payload.get("plan_id"))
             else:
                 return self._json(404, {"ok": False, "error": "接口不存在"})
             return self._json(200, {"ok": True, "data": result})
@@ -174,17 +360,23 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Interactive VCF query tool")
+    parser = argparse.ArgumentParser(description="GPA-Accelerator local genomics and phenotype analysis")
     parser.add_argument("--host", default=os.environ.get("VCF_TOOL_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("VCF_TOOL_PORT", "8765")))
     parser.add_argument("--bcftools", default=os.environ.get("BCFTOOLS"))
     args = parser.parse_args()
 
-    global SERVICE, ADVANCED
+    global SERVICE, ADVANCED, QUALITY, REPAIR, PHENOTYPE, ASSOCIATION, EMMAX, SIMILARITY
     SERVICE = create_service(args.bcftools)
     ADVANCED = AdvancedAnalyzer(SERVICE)
+    QUALITY = QualityJobManager(SERVICE)
+    REPAIR = RepairExecutor(SERVICE)
+    PHENOTYPE = PhenotypeAnalyzer()
+    ASSOCIATION = VariantPhenotypeAnalyzer(SERVICE)
+    EMMAX = EmmaxJobManager(SERVICE)
+    SIMILARITY = SimilarityJobManager()
     server = AppServer((args.host, args.port), Handler)
-    print("VCF Query Tool: http://{}:{}".format(args.host, args.port), flush=True)
+    print("GPA-Accelerator: http://{}:{}".format(args.host, args.port), flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

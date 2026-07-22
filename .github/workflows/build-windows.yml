@@ -13,19 +13,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: python -m pip install --upgrade pip pyinstaller
+      - run: python -m pip install --upgrade pip pyinstaller openpyxl
       - run: python -m unittest discover -s tests -v
       - name: Build local executable
         shell: pwsh
         run: >-
-          pyinstaller --noconfirm --clean --onefile --name CallVCF
-          --add-data "static;static" start_local.py
+          pyinstaller --noconfirm --clean --onefile --name GPA-Accelerator
+          --add-data "static;static" --add-data "vendor/emmax;vendor/emmax" start_local.py
       - uses: actions/upload-artifact@v4
         with:
-          name: CallVCF-Windows
-          path: dist/CallVCF.exe
+          name: GPA-Accelerator-Windows
+          path: dist/GPA-Accelerator.exe
       - name: Attach executable to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/CallVCF.exe
+          files: dist/GPA-Accelerator.exe

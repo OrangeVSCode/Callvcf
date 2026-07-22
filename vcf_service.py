@@ -110,12 +110,38 @@ def parse_loci(raw, limit=500):
     return found
 
 
+def detect_compression(path):
+    """Return plain, gzip, or bgzf based on file bytes rather than the suffix."""
+    path = Path(path)
+    with path.open("rb") as handle:
+        header = handle.read(12)
+        if len(header) < 2 or header[:2] != b"\x1f\x8b":
+            return "plain"
+        if len(header) < 12 or not (header[3] & 0x04):
+            return "gzip"
+        extra_length = int.from_bytes(header[10:12], "little")
+        extra = handle.read(extra_length)
+
+    offset = 0
+    while offset + 4 <= len(extra):
+        subfield_id = extra[offset:offset + 2]
+        subfield_length = int.from_bytes(extra[offset + 2:offset + 4], "little")
+        offset += 4
+        if offset + subfield_length > len(extra):
+            break
+        if subfield_id == b"BC" and subfield_length == 2:
+            return "bgzf"
+        offset += subfield_length
+    return "gzip"
+
+
 class VCFService:
     def __init__(self, bcftools=None):
         self.bcftools = bcftools or os.environ.get("BCFTOOLS") or shutil.which("bcftools")
         if not self.bcftools:
             raise VCFError("未找到 bcftools")
         self._cache = {}
+        self._record_count_cache = {}
         self._cache_lock = threading.Lock()
 
     def _run(self, args, timeout=180, check=True):
@@ -134,6 +160,49 @@ class VCFService:
             raise VCFError(detail[-3000:])
         return proc
 
+    def _run_pipeline(self, producer_args, consumer_args, timeout=900):
+        """Run bcftools-to-bcftools in memory without writing a large subset file."""
+        producer = subprocess.Popen(
+            producer_args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        producer_errors = []
+
+        def collect_producer_stderr():
+            if producer.stderr:
+                producer_errors.append(producer.stderr.read())
+
+        stderr_thread = threading.Thread(target=collect_producer_stderr, daemon=True)
+        stderr_thread.start()
+        try:
+            consumer = subprocess.Popen(
+                consumer_args,
+                stdin=producer.stdout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if producer.stdout:
+                producer.stdout.close()
+            try:
+                stdout, consumer_stderr = consumer.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                consumer.kill()
+                producer.kill()
+                consumer.communicate()
+                raise VCFError("操作超时；请为大型 VCF.GZ 建立 .tbi/.csi 索引后重试")
+            producer_code = producer.wait(timeout=30)
+            stderr_thread.join(timeout=5)
+            producer_stderr = b"".join(producer_errors).decode("utf-8", errors="replace")
+            if producer_code != 0 or consumer.returncode != 0:
+                detail = (consumer_stderr or producer_stderr or "bcftools 管道执行失败").strip()
+                raise VCFError(detail[-3000:])
+            return stdout
+        finally:
+            if producer.poll() is None:
+                producer.terminate()
+
     @staticmethod
     def _validate_file(path_text):
         if not path_text:
@@ -151,6 +220,58 @@ class VCFService:
                 return candidate
         return None
 
+    @staticmethod
+    def _record_count_key(path):
+        stat = Path(path).stat()
+        return str(Path(path)), stat.st_mtime_ns, stat.st_size
+
+    def _remember_record_count(self, path, count):
+        key = self._record_count_key(path)
+        with self._cache_lock:
+            self._record_count_cache[key] = int(count)
+            for cache_key, metadata in self._cache.items():
+                if tuple(cache_key[:3]) == key:
+                    metadata["record_count"] = int(count)
+                    metadata["record_count_source"] = "full_stream"
+
+    def count_records(self, path_text):
+        """Count records without writing an uncompressed copy to disk."""
+        path = self._validate_file(path_text)
+        key = self._record_count_key(path)
+        with self._cache_lock:
+            cached = self._record_count_cache.get(key)
+        if cached is not None:
+            return {"record_count": cached, "cached": True, "elapsed_seconds": 0.0,
+                    "method": "cached full stream"}
+
+        metadata = self.inspect(str(path))
+        if metadata.get("record_count") is not None:
+            return {"record_count": metadata["record_count"], "cached": True, "elapsed_seconds": 0.0,
+                    "method": metadata.get("record_count_source") or "index"}
+
+        started = time.time()
+        proc = subprocess.Popen(
+            [self.bcftools, "view", "-H", str(path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        count = 0
+        try:
+            for _ in proc.stdout:
+                count += 1
+                if time.time() - started > 1800:
+                    raise VCFError("记录数统计超过 30 分钟，已停止；建议为 VCF.GZ 建立索引")
+            return_code = proc.wait()
+            stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+            if return_code != 0:
+                raise VCFError((stderr or "bcftools 记录计数失败")[-3000:])
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+        self._remember_record_count(path, count)
+        return {"record_count": count, "cached": False,
+                "elapsed_seconds": round(time.time() - started, 3), "method": "bcftools full stream"}
+
     def inspect(self, path_text, force=False):
         path = self._validate_file(path_text)
         stat = path.stat()
@@ -164,11 +285,14 @@ class VCFService:
         samples_out = self._run([self.bcftools, "query", "-l", str(path)], timeout=180).stdout
         samples = [x for x in samples_out.splitlines() if x]
         index_path = self._index_path(path)
-        record_count = None
+        with self._cache_lock:
+            record_count = self._record_count_cache.get((str(path), stat.st_mtime_ns, stat.st_size))
+        record_count_source = "full_stream" if record_count is not None else None
         if index_path:
             count_proc = self._run([self.bcftools, "index", "-n", str(path)], timeout=60, check=False)
             if count_proc.returncode == 0 and count_proc.stdout.strip().isdigit():
                 record_count = int(count_proc.stdout.strip())
+                record_count_source = "index"
 
         format_match = re.search(r"##fileformat=([^\r\n]+)", header)
         contigs = re.findall(r"##contig=<ID=([^,>]+)", header)
@@ -176,11 +300,14 @@ class VCFService:
         observed_types = Counter(x["variant_type"] for x in observed)
 
         name_lower = path.name.lower()
+        compression = "bcf" if name_lower.endswith(".bcf") else detect_compression(path)
         if name_lower.endswith(".bcf"):
             storage = "BCF"
-        elif name_lower.endswith(".vcf.gz") or name_lower.endswith(".vcf.bgz"):
-            storage = "BGZF/gzip VCF"
-        elif name_lower.endswith(".vcf"):
+        elif compression == "bgzf":
+            storage = "BGZF VCF（压缩直读）"
+        elif compression == "gzip":
+            storage = "gzip VCF（压缩直读）"
+        elif name_lower.endswith(".vcf") or compression == "plain":
             storage = "plain VCF"
         else:
             storage = "VCF-compatible"
@@ -190,11 +317,16 @@ class VCFService:
             "name": path.name,
             "file_size": stat.st_size,
             "storage": storage,
+            "compressed": compression in {"gzip", "bgzf", "bcf"},
+            "compression": compression,
             "vcf_version": format_match.group(1) if format_match else "unknown",
             "indexed": bool(index_path),
+            "index_usable": bool(index_path),
             "index_path": str(index_path) if index_path else None,
             "query_mode": "indexed random access" if index_path else "streaming target filter",
+            "space_mode": "direct source read; no decompressed VCF copy",
             "record_count": record_count,
+            "record_count_source": record_count_source,
             "sample_count": len(samples),
             "samples": samples,
             "contig_count": len(contigs),
@@ -290,23 +422,21 @@ class VCFService:
         fmt += "\n"
         sample_args = ["-s", ",".join(samples)] if samples else []
 
-        if metadata["indexed"]:
+        if metadata["index_usable"]:
             regions = ",".join("{}:{}".format(chrom, pos) for chrom, pos in loci)
             cmd = [self.bcftools, "query", "-r", regions] + sample_args + ["-f", fmt, str(path)]
             output = self._run(cmd, timeout=300).stdout
         else:
             with tempfile.TemporaryDirectory(prefix="vcf_query_") as tmpdir:
                 targets = Path(tmpdir) / "targets.tsv"
-                subset = Path(tmpdir) / "subset.bcf"
                 with targets.open("w", encoding="utf-8") as handle:
                     for chrom, pos in loci:
                         handle.write("{}\t{}\t{}\n".format(chrom, pos, pos))
-                self._run(
-                    [self.bcftools, "view", "-T", str(targets), "-Ob", "-o", str(subset), str(path)],
+                output = self._run_pipeline(
+                    [self.bcftools, "view", "-T", str(targets), "-Ou", str(path)],
+                    [self.bcftools, "query"] + sample_args + ["-f", fmt, "-"],
                     timeout=900,
                 )
-                cmd = [self.bcftools, "query"] + sample_args + ["-f", fmt, str(subset)]
-                output = self._run(cmd, timeout=300).stdout
 
         records = []
         for line in output.splitlines():
@@ -350,15 +480,15 @@ class VCFService:
         fmt += "\n"
         sample_args = ["-s", ",".join(samples)] if samples else []
         region = "{}:{}-{}".format(chrom, start, end)
-        if metadata["indexed"]:
+        if metadata["index_usable"]:
             cmd = [self.bcftools, "query", "-r", region] + sample_args + ["-f", fmt, str(path)]
             output = self._run(cmd, timeout=900).stdout
         else:
-            with tempfile.TemporaryDirectory(prefix="vcf_region_") as tmpdir:
-                subset = Path(tmpdir) / "region.bcf"
-                self._run([self.bcftools, "view", "-t", region, "-Ob", "-o", str(subset), str(path)], timeout=900)
-                cmd = [self.bcftools, "query"] + sample_args + ["-f", fmt, str(subset)]
-                output = self._run(cmd, timeout=900).stdout
+            output = self._run_pipeline(
+                [self.bcftools, "view", "-t", region, "-Ou", str(path)],
+                [self.bcftools, "query"] + sample_args + ["-f", fmt, "-"],
+                timeout=900,
+            )
         records = []
         for line in output.splitlines():
             parts = line.split("\t")
@@ -522,6 +652,7 @@ class PurePythonVCFService(VCFService):
     def __init__(self):
         self.bcftools = None
         self._cache = {}
+        self._record_count_cache = {}
         self._cache_lock = threading.Lock()
 
     @staticmethod
@@ -531,6 +662,37 @@ class PurePythonVCFService(VCFService):
         if magic == b"\x1f\x8b":
             return gzip.open(str(path), "rt", encoding="utf-8", errors="replace")
         return Path(path).open("r", encoding="utf-8", errors="replace")
+
+    @staticmethod
+    def _open_vcf_binary(path):
+        with Path(path).open("rb") as handle:
+            magic = handle.read(2)
+        if magic == b"\x1f\x8b":
+            return gzip.open(str(path), "rb")
+        return Path(path).open("rb")
+
+    def count_records(self, path_text):
+        path = self._validate_file(path_text)
+        if path.name.lower().endswith(".bcf"):
+            raise VCFError("BCF 记录计数需要安装 bcftools")
+        key = self._record_count_key(path)
+        with self._cache_lock:
+            cached = self._record_count_cache.get(key)
+        if cached is not None:
+            return {"record_count": cached, "cached": True, "elapsed_seconds": 0.0,
+                    "method": "cached full stream"}
+
+        started = time.time()
+        count = 0
+        with self._open_vcf_binary(path) as handle:
+            for line in handle:
+                if line and line[:1] != b"#":
+                    count += 1
+                if time.time() - started > 1800:
+                    raise VCFError("记录数统计超过 30 分钟，已停止；建议为 VCF.GZ 建立索引")
+        self._remember_record_count(path, count)
+        return {"record_count": count, "cached": False,
+                "elapsed_seconds": round(time.time() - started, 3), "method": "direct compressed stream"}
 
     def inspect(self, path_text, force=False):
         path = self._validate_file(path_text)
@@ -566,19 +728,34 @@ class PurePythonVCFService(VCFService):
                     if observed_records >= 500:
                         break
 
-        lower = path.name.lower()
-        storage = "gzip/BGZF VCF" if lower.endswith((".vcf.gz", ".vcf.bgz", ".gz")) else "plain VCF"
+        compression = detect_compression(path)
+        if compression == "bgzf":
+            storage = "BGZF VCF（压缩直读）"
+        elif compression == "gzip":
+            storage = "gzip VCF（压缩直读）"
+        else:
+            storage = "plain VCF"
         index_path = self._index_path(path)
+        with self._cache_lock:
+            record_count = self._record_count_cache.get((str(path), stat.st_mtime_ns, stat.st_size))
         result = {
             "path": str(path),
             "name": path.name,
             "file_size": stat.st_size,
             "storage": storage,
+            "compressed": compression in {"gzip", "bgzf"},
+            "compression": compression,
             "vcf_version": version,
             "indexed": bool(index_path),
+            "index_usable": False,
             "index_path": str(index_path) if index_path else None,
-            "query_mode": "local sequential scan (install bcftools for index acceleration)",
-            "record_count": None,
+            "query_mode": (
+                "direct compressed stream; index detected but bcftools is required to use it"
+                if index_path else "direct sequential stream; no decompressed copy"
+            ),
+            "space_mode": "direct source read; no decompressed VCF copy",
+            "record_count": record_count,
+            "record_count_source": "full_stream" if record_count is not None else None,
             "sample_count": len(samples),
             "samples": samples,
             "contig_count": len(contigs),
@@ -591,10 +768,18 @@ class PurePythonVCFService(VCFService):
             self._cache = {cache_key: result}
         return result
 
-    def _iter_vcf_records(self, path, selected_samples, target_set=None):
+    def _iter_vcf_records(self, path, selected_samples, target_set=None, region=None):
         metadata = self.inspect(str(path))
         all_samples = metadata["samples"]
         selected_indices = [all_samples.index(s) for s in selected_samples]
+        region_chrom, region_start, region_end = region if region else (None, None, None)
+        seen_region_chrom = False
+        target_stop = None
+        contig_rank = {chrom: index for index, chrom in enumerate(metadata.get("contigs") or [])}
+        if target_set and all(chrom in contig_rank for chrom, _ in target_set):
+            last_rank = max(contig_rank[chrom] for chrom, _ in target_set)
+            last_pos = max(pos for chrom, pos in target_set if contig_rank[chrom] == last_rank)
+            target_stop = (last_rank, last_pos)
         with self._open_vcf(path) as handle:
             for line in handle:
                 if line.startswith("#"):
@@ -607,6 +792,20 @@ class PurePythonVCFService(VCFService):
                     pos = int(parts[1])
                 except ValueError:
                     continue
+                if target_stop is not None and chrom in contig_rank:
+                    rank = contig_rank[chrom]
+                    if rank > target_stop[0] or (rank == target_stop[0] and pos > target_stop[1]):
+                        break
+                if region is not None:
+                    if chrom != region_chrom:
+                        if seen_region_chrom:
+                            break
+                        continue
+                    seen_region_chrom = True
+                    if pos < region_start:
+                        continue
+                    if pos > region_end:
+                        break
                 if target_set is not None and (chrom, pos) not in target_set:
                     continue
                 ref, alt, info_text = parts[3], parts[4], parts[7]
@@ -656,11 +855,10 @@ class PurePythonVCFService(VCFService):
             raise VCFError("无效的查询区间")
         samples = metadata["samples"] if selected_samples is None else self._validate_samples(metadata, selected_samples)
         records = []
-        for record in self._iter_vcf_records(path, samples, None):
-            if record["chrom"] == chrom and start <= record["pos"] <= end:
-                records.append(record)
-                if len(records) > int(max_records):
-                    raise VCFError("区间内变异超过 {} 条；请缩小窗口或安装 bcftools".format(max_records))
+        for record in self._iter_vcf_records(path, samples, None, (chrom, start, end)):
+            records.append(record)
+            if len(records) > int(max_records):
+                raise VCFError("区间内变异超过 {} 条；请缩小窗口或安装 bcftools".format(max_records))
         return metadata, samples, records
 
     def _iter_all_genotypes(self, path, samples):

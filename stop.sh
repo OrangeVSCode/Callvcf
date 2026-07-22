@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 if [[ ! -f callvcf.pid ]]; then
-  echo "CallVCF is not running (no PID file)"
+  echo "GPA-Accelerator is not running (no PID file)"
   exit 0
 fi
 
@@ -21,5 +21,4 @@ if kill -0 "$PID" 2>/dev/null; then
   done
 fi
 rm -f callvcf.pid
-echo "CallVCF stopped"
-
+echo "GPA-Accelerator stopped"
