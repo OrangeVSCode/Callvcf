@@ -17,6 +17,7 @@ from advanced_analysis import AdvancedAnalyzer
 from quality_engine import QualityJobManager
 from phenotype_engine import PhenotypeAnalyzer
 from association_engine import VariantPhenotypeAnalyzer
+from emmax_engine import EmmaxJobManager
 from repair_engine import RepairExecutor
 from tool_manager import install_tool, tools_status
 
@@ -29,6 +30,7 @@ QUALITY = None
 REPAIR = None
 PHENOTYPE = None
 ASSOCIATION = None
+EMMAX = None
 
 
 def _windows_dialog(kind="file", initial_dir=None):
@@ -231,6 +233,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers(); self.wfile.write(body); return
             except VCFError as exc:
                 return self._json(404, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/emmax/artifact":
+            try:
+                query = parse_qs(parsed.query)
+                name = (query.get("name") or [""])[0]
+                path = EMMAX.artifact((query.get("run_id") or [""])[0], name)
+                body = path.read_bytes()
+                mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+                self.send_response(200)
+                self.send_header("Content-Type", mime + ("; charset=utf-8" if mime.startswith("text/") or mime in {"application/json", "image/svg+xml"} else ""))
+                disposition = "inline" if (query.get("view") or [""])[0] == "1" and path.suffix.lower() in {".html", ".svg"} else "attachment"
+                self.send_header("Content-Disposition", "{}; filename=\"{}\"".format(disposition, path.name))
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers(); self.wfile.write(body); return
+            except VCFError as exc:
+                return self._json(404, {"ok": False, "error": str(exc)})
         relative = "index.html" if parsed.path in {"", "/"} else unquote(parsed.path.lstrip("/"))
         candidate = (STATIC_DIR / relative).resolve()
         if STATIC_DIR not in candidate.parents and candidate != STATIC_DIR:
@@ -292,6 +310,12 @@ class Handler(BaseHTTPRequestHandler):
                 result = PHENOTYPE.analyze(payload)
             elif route == "/api/variant-phenotype/analyze":
                 result = ASSOCIATION.analyze(payload)
+            elif route == "/api/emmax/start":
+                result = EMMAX.start(payload)
+            elif route == "/api/emmax/status":
+                result = EMMAX.status(payload.get("run_id"))
+            elif route == "/api/emmax/cancel":
+                result = EMMAX.cancel(payload.get("run_id"))
             elif route == "/api/quality/status":
                 result = QUALITY.status(payload.get("run_id"))
             elif route == "/api/quality/cancel":
@@ -321,13 +345,14 @@ def main():
     parser.add_argument("--bcftools", default=os.environ.get("BCFTOOLS"))
     args = parser.parse_args()
 
-    global SERVICE, ADVANCED, QUALITY, REPAIR, PHENOTYPE, ASSOCIATION
+    global SERVICE, ADVANCED, QUALITY, REPAIR, PHENOTYPE, ASSOCIATION, EMMAX
     SERVICE = create_service(args.bcftools)
     ADVANCED = AdvancedAnalyzer(SERVICE)
     QUALITY = QualityJobManager(SERVICE)
     REPAIR = RepairExecutor(SERVICE)
     PHENOTYPE = PhenotypeAnalyzer()
     ASSOCIATION = VariantPhenotypeAnalyzer(SERVICE)
+    EMMAX = EmmaxJobManager(SERVICE)
     server = AppServer((args.host, args.port), Handler)
     print("GPA-Accelerator: http://{}:{}".format(args.host, args.port), flush=True)
     try:

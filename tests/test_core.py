@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from vcf_service import classify_variant, detect_compression, genotype_alleles, normalize_genotype, parse_loci
+from vcf_service import VCFError, classify_variant, detect_compression, genotype_alleles, normalize_genotype, parse_loci
 from vcf_service import PurePythonVCFService
 from advanced_analysis import AdvancedAnalyzer, genotype_dosage, pairwise_r2, pairwise_dprime, parse_region, parse_trait_directions
 from tool_manager import deploy_bundled_emmax, tools_status
@@ -19,6 +19,7 @@ from population_analysis import PopulationAnalyzer
 from repair_engine import RepairExecutor, _quality_comparison
 from phenotype_engine import PhenotypeAnalyzer, phenotype_catalog
 from association_engine import VariantPhenotypeAnalyzer
+from emmax_engine import EmmaxJobManager
 
 
 def bgzf_block(data):
@@ -34,6 +35,70 @@ def bgzf_block(data):
 
 
 class CoreTests(unittest.TestCase):
+    def test_emmax_managed_pipeline_with_simulated_tools(self):
+        class SimulatedEmmax(EmmaxJobManager):
+            def _runtime(self):
+                return {"plink": "plink", "emmax": "emmax", "kin": "emmax-kin", "system": "Linux"}
+
+            def _run_command(self, command, cwd, log_path, cancel):
+                command = [str(item) for item in command]
+                with Path(log_path).open("a", encoding="utf-8") as log:
+                    log.write("SIMULATED {}\n".format(" ".join(command)))
+                if command[0] == "plink":
+                    prefix = Path(command[command.index("--out") + 1])
+                    if "--make-bed" in command:
+                        prefix.with_suffix(".bed").write_bytes(b"bed")
+                        prefix.with_suffix(".bim").write_text(
+                            "1\trs1\t0\t100\tG\tA\n1\trs2\t0\t200\tT\tC\n1\trs3\t0\t300\tC\tG\n", encoding="utf-8")
+                        prefix.with_suffix(".fam").write_text(
+                            "S1 S1 0 0 0 -9\nS2 S2 0 0 0 -9\nS3 S3 0 0 0 -9\nS4 S4 0 0 0 -9\n", encoding="utf-8")
+                    elif "--indep-pairwise" in command:
+                        raise VCFError("Too few valid variants for --indep-pairwise")
+                    elif "--write-snplist" in command:
+                        Path(str(prefix) + ".snplist").write_text("rs1\nrs2\n", encoding="utf-8")
+                    elif "--recode" in command and "transpose" in command:
+                        Path(str(prefix) + ".tfam").write_text(
+                            "S1 S1 0 0 0 -9\nS2 S2 0 0 0 -9\nS3 S3 0 0 0 -9\nS4 S4 0 0 0 -9\n", encoding="utf-8")
+                        Path(str(prefix) + ".tped").write_text(
+                            "1 rs1 0 100 1 1 1 2 2 2 1 1\n"
+                            "1 rs2 0 200 1 1 1 2 2 2 2 2\n"
+                            "1 rs3 0 300 1 2 1 2 2 2 1 1\n", encoding="utf-8")
+                elif command[0] == "emmax-kin":
+                    Path(command[-1] + ".aBN.kinf").write_text("1 0 0 0\n", encoding="utf-8")
+                elif command[0] == "emmax":
+                    prefix = Path(command[command.index("-o") + 1])
+                    Path(str(prefix) + ".ps").write_text(
+                        "rs1 1.2 0.3 0.0001\nrs2 -0.2 0.2 0.3\nrs3 0.5 0.25 0.04\n", encoding="utf-8")
+                    Path(str(prefix) + ".reml").write_text("-10\n-12\n1.5\n2\n3\n0.4\n", encoding="utf-8")
+
+        fixture = Path(__file__).resolve().parent / "fixtures" / "tiny.vcf"
+        phenotype = Path(__file__).resolve().parent / "fixtures" / "association_phenotype.csv"
+        with tempfile.TemporaryDirectory(prefix="gpa-emmax-simulated-") as temp_name:
+            manager = SimulatedEmmax(PurePythonVCFService())
+            job = manager.start({
+                "vcf_path": str(fixture), "phenotype_path": str(phenotype),
+                "trait_query": "SPAD_23_AV", "match_mode": "exact", "combine": False,
+                "output_dir": str(Path(temp_name) / "runs"),
+            })
+            for _ in range(200):
+                job = manager.status(job["id"])
+                if job["status"] in {"complete", "failed", "cancelled"}:
+                    break
+                import time
+                time.sleep(.02)
+            self.assertEqual(job["status"], "complete", job.get("error"))
+            self.assertEqual(job["result"]["summary"]["analyses_completed"], 1)
+            trait = job["result"]["traits"][0]
+            self.assertEqual(trait["tested_markers"], 3)
+            self.assertAlmostEqual(trait["top_hits"][0]["pvalue"], .0001)
+            self.assertAlmostEqual(trait["reml"]["pseudo_heritability"], .4)
+            self.assertTrue(any("未剪枝标记" in warning for warning in job["result"]["warnings"]))
+            names = {item["name"] for item in job["artifacts"]}
+            self.assertIn("emmax_report.html", names)
+            self.assertIn(trait["result_file"], names)
+            self.assertFalse((Path(job["run_dir"]) / "association.tped").exists())
+            self.assertTrue(manager.artifact(job["id"], trait["result_file"]).is_file())
+
     def test_bundled_emmax_deploys_without_network(self):
         with tempfile.TemporaryDirectory(prefix="gpa-emmax-tools-") as temp_name:
             previous = os.environ.get("GPA_ACCELERATOR_TOOL_DIR")

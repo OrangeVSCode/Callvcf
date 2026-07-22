@@ -17,6 +17,7 @@ GPA-Accelerator 是一个面向植物基因型、表型质量控制和关联解�
 - 可调用本地 LDBlockShow，传入 VCF、连锁区间、GFF 与区域 GWAS 数据，保留 `.blocks.gz`、`.site.gz`、SVG/PNG 等原始结果。
 - 页面内置工具管理器：一键下载官方 PLINK 1.9、LDBlockShow 与 bcftools；官方 EMMAX Ubuntu x64 二进制随完整安装包提供，首次启动自动部署到当前用户的 GPA-Accelerator 工具目录。第三方工具不上传用户数据。
 - “位点 × 表型”按样本 ID 对齐 VCF 与 XLSX/CSV/TSV/TXT/PS/PHEN 表型：既能精确检验 `24:73009658 × SPAD_MNS_23`，也能用 `SPAD` 前缀批量拆分所有平均表型，并额外计算同量纲原始均值与跨环境标准化综合值；输出基因型分组、样本明细、效应量、P 值/FDR、SVG 图、HTML 报告和 ZIP。
+- 同一页面可启动完整 EMMAX 全基因组混合模型：自动用 PLINK 将 VCF/VCF.GZ 转成 TPED/TFAM，按 call rate、MAF 和 LD 剪枝构建 BN/IBS kinship，依次运行精确表型或表型家族，并输出 Manhattan、Q-Q、λGC、REML/伪遗传力、Top hits、压缩全结果及 HTML/ZIP 报告。任务在本机后台运行，支持进度、取消、现成 kinship 和协变量文件。
 - 表型质控支持 XLSX、CSV、TSV 和 TXT 的宽表/长表自动识别，按原始重复计算材料×年份×地点均值，并输出环境调整 BLUE、经验随机效应 BLUP、遗传力、可靠度和方差组分。
 - 同时运行 IQR、3-sigma、MAD robust-z、尾部分位数与生物学范围检查；生成年度密度叠加图/合并图/逐年图、时间播放、经纬度动态分布和表型相关热图。
 - `.vcf.gz` 的位点查询、样本统计、LD/热图、基因注释、样本画像、PLINK 与 LDBlockShow 路径均直接读取压缩源文件，不生成同体积的解压 VCF 副本。
@@ -180,6 +181,12 @@ GPA-Accelerator 不把 PLINK 或 LDBlockShow 二进制直接合并进单文件 E
 - PLINK 1.9：GPL-3.0，官方稳定版 beta 7.11（2025-08-19）。
 - LDBlockShow：MIT，官方维护仓库 `hewm2008/LDBlockShow`；官方仅支持 Linux/Unix/macOS，Windows 需要 WSL。
 - EMMAX：MIT，随包版本为官方 `emmax-intel-binary-20120210`（程序 build `20120205`）。它是 Ubuntu x86-64 程序，因此 Windows 实际运行混合模型前仍需完成 Ubuntu/WSL 首次初始化；这项系统级初始化无法由普通应用安装包静默替代。
+
+### EMMAX 一键流程
+
+“位点 × 表型”页的全基因组 EMMAX 默认使用适合常规植物 GWAS 的保守起点：kinship 标记 call rate≥0.95、MAF≥0.01、PLINK `--indep-pairwise 50 5 0.2`，关联标记 call rate≥0.50、MAF≥0.001；所有参数均可修改。植物自交群体和明显群体结构数据不默认进行 HWE 过滤。官方推荐 BN kinship，本工具也保留 IBS 选项。
+
+EMMAX 的 TPED 是未压缩文本，运行期间可能显著大于 `.vcf.gz`。任务开始前会检查输出磁盘空间；完成后默认删除 BED/TPED/TFAM 和原始 `.ps` 等大型中间文件，仅保留每个表型的 `emmax_results.tsv.gz`、图形、Top hits、日志及报告。如需复核外部程序原始中间件，可明确勾选“保留 PLINK/TPED 中间文件”。
 
 详见 `THIRD_PARTY_NOTICES.md`。
 

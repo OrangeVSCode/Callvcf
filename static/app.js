@@ -1,4 +1,4 @@
-const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null, phenotypeResult: null, associationResult: null, qualityCatalog: null, qualityRun: null, qualityPoll: null, qcRecommendation: null, repairCatalog: null, repairPlan: null, repairPoll: null, repairCompleted: false, applyingCropPreset: false };
+const state = { metadata: null, activeTab: "existence", lastResult: null, lastLeadResult: null, lastProfileResult: null, phenotypeResult: null, associationResult: null, emmaxJob: null, emmaxPoll: null, qualityCatalog: null, qualityRun: null, qualityPoll: null, qcRecommendation: null, repairCatalog: null, repairPlan: null, repairPoll: null, repairCompleted: false, applyingCropPreset: false };
 const $ = (id) => document.getElementById(id);
 const categoryOrder = ["HOM_REF", "HET", "HOM_ALT", "MISSING", "OTHER"];
 const shortLabels = { HOM_REF: "0/0", HET: "0/1", HOM_ALT: "1/1", MISSING: "缺失", OTHER: "其他" };
@@ -1175,8 +1175,9 @@ function updateRepairFields() {
   $("repairExecutorCard").querySelector(".repair-samples-field").classList.toggle("hidden", action !== "subset_samples_copy");
   $("repairExecutorCard").querySelector(".repair-qc-field").classList.toggle("hidden", !isQc);
   if (isQc && !state.qcRecommendation) $("qcRecommendationSummary").innerHTML = "<b>尚无自适应参数。</b>请先运行上方质量评估；也可以切换为“使用者自定义”后手工设置。";
-  if (isQc && !$("repairOutputPath").value.trim() && currentPath()) {
-    $("repairOutputPath").value = currentPath().replace(/(?:\.vcf(?:\.gz|\.bgz)?|\.bcf)$/i, "") + ".GPA_QC.vcf.gz";
+  const loadedPath = $("vcfPath").value.trim();
+  if (isQc && !$("repairOutputPath").value.trim() && loadedPath) {
+    $("repairOutputPath").value = loadedPath.replace(/(?:\.vcf(?:\.gz|\.bgz)?|\.bcf)$/i, "") + ".GPA_QC.vcf.gz";
   }
   if (action === "mask_genotypes_copy") {
     $("repairExpressionLabel").textContent = "要掩蔽为缺失的GT条件";
@@ -1352,6 +1353,75 @@ async function runVariantPhenotypeAnalysis() {
   } finally { clearLoading(target, button); }
 }
 
+function renderEmmaxJob(job) {
+  state.emmaxJob = job;
+  const target = $("emmaxRunResult"), button = $("emmaxRunBtn"), cancel = $("emmaxCancelBtn");
+  const running = !["complete", "failed", "cancelled"].includes(job.status);
+  button.disabled = running;
+  button.textContent = running ? "EMMAX 运行中…" : "运行全基因组 EMMAX";
+  cancel.classList.toggle("hidden", !running);
+  if (running) {
+    target.className = "result-body";
+    target.innerHTML = `<div class="readiness-banner caution"><b>${escapeHtml(job.message || job.stage)}</b><span>任务在本机后台运行；可以切换页面。不要移动输入文件或关闭 GPA-Accelerator。</span></div><div class="job-progress"><div style="width:${Math.max(1, Math.min(100, Number(job.progress)||0))}%"></div></div><div class="quality-summary"><div class="meta-card"><span>进度</span><strong>${formatNumber(job.progress)}%</strong></div><div class="meta-card"><span>阶段</span><strong>${escapeHtml(job.stage)}</strong></div><div class="meta-card"><span>预计工作空间</span><strong>${formatBytes(job.estimated_workspace_bytes)}</strong></div></div><p class="sub">输出目录：${escapeHtml(job.run_dir)}</p>`;
+    return;
+  }
+  if (job.status !== "complete") {
+    target.className = "result-body empty-state";
+    target.textContent = job.error || job.message || "EMMAX 任务未完成";
+    return;
+  }
+  const result = job.result || {}, traits = result.traits || [], artifacts = job.artifacts || [];
+  const report = artifacts.find(item => item.name === "emmax_report.html");
+  const archive = artifacts.find(item => item.name.endsWith("EMMAX_report.zip"));
+  const completed = traits.filter(item => item.status === "complete");
+  const cards = completed.map(item => { const hit = item.top_hits?.[0]; return `<div class="meta-card"><span>${escapeHtml(item.trait)}</span><strong>${hit ? associationNumber(hit.pvalue) : "—"}</strong><small>${formatNumber(item.tested_markers)} markers · λGC ${associationNumber(item.lambda_gc,3)} · h² ${associationNumber(item.reml?.pseudo_heritability,3)}</small></div>`; }).join("");
+  const rows = completed.flatMap(item => (item.top_hits || []).slice(0,10).map(hit => `<tr><td>${escapeHtml(item.trait)}</td><td>${formatNumber(hit.rank)}</td><td>${escapeHtml(hit.marker)}</td><td>${escapeHtml(hit.chrom)}:${formatNumber(hit.pos)}</td><td>${associationNumber(hit.beta)}</td><td>${associationNumber(hit.pvalue)}</td></tr>`)).join("");
+  const plots = completed.map(item => { const manhattan = artifacts.find(x => x.name === item.manhattan), qq = artifacts.find(x => x.name === item.qq); return `<section class="quality-section"><h4>${escapeHtml(item.trait)}</h4><div class="emmax-plot-grid">${manhattan ? `<img src="${escapeHtml(manhattan.view_url)}" alt="Manhattan">` : ""}${qq ? `<img src="${escapeHtml(qq.view_url)}" alt="Q-Q">` : ""}</div></section>`; }).join("");
+  const links = artifacts.map(item => { const view = item.name.endsWith(".html") || item.name.endsWith(".svg"); return `<a class="artifact-link"${view ? ' target="_blank" rel="noopener"' : ""} href="${escapeHtml(view ? item.view_url : item.url)}">${escapeHtml(item.name)} <small>${formatBytes(item.size)}</small></a>`; }).join("");
+  target.className = "result-body";
+  target.innerHTML = `<div class="readiness-banner ready"><b>EMMAX 全基因组混合模型完成</b><span>${formatNumber(result.summary?.analyses_completed)} 个分析；完整结果以 gzip 压缩保存，大型 TPED 默认已清理。</span></div><div class="quality-summary">${cards}</div><div class="handoff-bar"><strong>报告</strong>${report ? `<a class="artifact-link" target="_blank" rel="noopener" href="${escapeHtml(report.view_url)}">打开HTML报告</a>` : ""}${archive ? `<a class="artifact-link" href="${escapeHtml(archive.url)}">下载报告ZIP</a>` : ""}</div>${plots}<section class="quality-section"><h4>每个表型前10个信号</h4><div class="table-wrap"><table><thead><tr><th>表型</th><th>Rank</th><th>Marker</th><th>位置</th><th>Beta</th><th>P</th></tr></thead><tbody>${rows}</tbody></table></div></section><section class="quality-section"><h4>全部结果文件</h4><div class="artifact-list">${links}</div><p class="sub">输出目录：${escapeHtml(job.run_dir)}</p></section>`;
+}
+
+async function pollEmmax(runId) {
+  clearTimeout(state.emmaxPoll);
+  try {
+    const job = await api("/api/emmax/status", {run_id: runId});
+    renderEmmaxJob(job);
+    if (!["complete", "failed", "cancelled"].includes(job.status)) state.emmaxPoll = setTimeout(() => pollEmmax(runId), 1400);
+    else toast(job.status === "complete" ? "EMMAX 分析完成" : (job.error || job.message), job.status !== "complete");
+  } catch (error) { toast(error.message, true); $("emmaxRunBtn").disabled = false; }
+}
+
+async function runEmmaxAnalysis() {
+  const phenotypePath = $("associationPhenotypePath").value.trim();
+  if (!phenotypePath) return toast("请选择表型文件", true);
+  if (!$("associationTraitQuery").value.trim()) return toast("请输入精确表型名或表型前缀", true);
+  const columnIds = {sample:"associationColSample", trait:"associationColTrait", value:"associationColValue", year:"associationColYear", location:"associationColLocation"};
+  const columns = {}; Object.entries(columnIds).forEach(([key,id]) => { const value=$(id).value.trim(); if(value) columns[key]=value; });
+  const button = $("emmaxRunBtn"); button.disabled = true; button.textContent = "正在创建任务…";
+  try {
+    const job = await api("/api/emmax/start", {
+      vcf_path: currentPath(), phenotype_path: phenotypePath, trait_query: $("associationTraitQuery").value.trim(),
+      match_mode: $("associationMatchMode").value, sheet: $("associationSheet").value.trim(), output_dir: $("associationOutputDir").value.trim(), columns,
+      year_filter: $("associationYearFilter").value.trim(), location_filter: $("associationLocationFilter").value.trim(),
+      include_replicates: $("associationReplicates").checked, combine: $("associationCombine").checked,
+      min_trait_coverage: phenotypeNumber("associationCoverage", .5), kinship_mode: $("emmaxKinshipMode").value,
+      kinship_path: $("emmaxKinshipPath").value.trim(), covariate_path: $("emmaxCovariatePath").value.trim(),
+      kinship_call_rate: phenotypeNumber("emmaxKinCall", .95), kinship_maf: phenotypeNumber("emmaxKinMaf", .01),
+      association_call_rate: phenotypeNumber("emmaxAssocCall", .5), association_maf: phenotypeNumber("emmaxAssocMaf", .001),
+      prune_window: phenotypeNumber("emmaxPruneWindow", 50), prune_step: phenotypeNumber("emmaxPruneStep", 5), prune_r2: phenotypeNumber("emmaxPruneR2", .2),
+      keep_intermediates: $("emmaxKeepIntermediates").checked,
+    });
+    renderEmmaxJob(job); pollEmmax(job.id); toast("EMMAX 后台任务已启动");
+  } catch (error) { button.disabled = false; button.textContent = "运行全基因组 EMMAX"; $("emmaxRunResult").className="result-body empty-state"; $("emmaxRunResult").textContent=error.message; toast(error.message,true); }
+}
+
+async function cancelEmmaxAnalysis() {
+  if (!state.emmaxJob?.id) return;
+  try { renderEmmaxJob(await api("/api/emmax/cancel", {run_id: state.emmaxJob.id})); }
+  catch (error) { toast(error.message, true); }
+}
+
 function initEvents() {
   $("selectFileBtn").addEventListener("click", selectLocalFile);
   $("shutdownBtn").addEventListener("click", shutdownLocal);
@@ -1372,6 +1442,8 @@ function initEvents() {
   $("sampleLeadRunBtn").addEventListener("click", runSampleLeadProfile);
   $("phenotypeRunBtn").addEventListener("click", runPhenotypeAnalysis);
   $("variantPhenotypeRunBtn").addEventListener("click", runVariantPhenotypeAnalysis);
+  $("emmaxRunBtn").addEventListener("click", runEmmaxAnalysis);
+  $("emmaxCancelBtn").addEventListener("click", cancelEmmaxAnalysis);
   $("qualityRunBtn").addEventListener("click", runQualityAssessment);
   $("qualityCancelBtn").addEventListener("click", cancelQualityAssessment);
   $("qualityCrop").addEventListener("change", applyCropPreset);

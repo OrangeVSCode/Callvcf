@@ -310,7 +310,23 @@
               </div>
             </details>
             <div class="tool-card emmax-card"><div><b>EMMAX 混合模型</b><small id="emmaxAssociationStatus">正在检查随包运行时…</small></div><button class="secondary install-tool" data-tool="emmax">部署/检查</button></div>
-            <p class="sub">官方 EMMAX Ubuntu x64 二进制已随完整安装包提供，采用 MIT 许可；Windows 通过 WSL 调用。它用于全基因组或批量位点的亲缘矩阵校正，当前单点快速验证不会强制调用。</p>
+            <p class="sub">官方 EMMAX Ubuntu x64 二进制已随完整安装包提供，采用 MIT 许可；Windows 通过 WSL 调用。普通单点快速验证不会强制调用。</p>
+            <details class="resource-panel emmax-run-panel" open>
+              <summary>全基因组 EMMAX：自动生成 TPED/TFAM、kinship、Manhattan 与 Q-Q 图</summary>
+              <div class="threshold-grid">
+                <label class="field"><span>亲缘矩阵</span><select id="emmaxKinshipMode"><option value="BN">BN（推荐）</option><option value="IBS">IBS</option></select></label>
+                <label class="field"><span>已有 kinship（可选）</span><div class="resource-input"><input id="emmaxKinshipPath" type="text" placeholder="留空自动计算 .aBN.kinf"><button class="secondary browse-resource" data-target="emmaxKinshipPath" data-kind="file">选择…</button></div></label>
+                <label class="field"><span>协变量文件（可选）</span><div class="resource-input"><input id="emmaxCovariatePath" type="text" placeholder="FID IID intercept covariates"><button class="secondary browse-resource" data-target="emmaxCovariatePath" data-kind="file">选择…</button></div></label>
+                <label class="field"><span>Kinship 最低 call rate</span><input id="emmaxKinCall" type="number" min="0.5" max="1" step="0.01" value="0.95"></label>
+                <label class="field"><span>Kinship 最低 MAF</span><input id="emmaxKinMaf" type="number" min="0" max="0.5" step="0.001" value="0.01"></label>
+                <label class="field"><span>关联最低 call rate</span><input id="emmaxAssocCall" type="number" min="0.1" max="1" step="0.01" value="0.50"></label>
+                <label class="field"><span>关联最低 MAF</span><input id="emmaxAssocMaf" type="number" min="0" max="0.5" step="0.001" value="0.001"></label>
+                <label class="field"><span>LD剪枝窗口 / 步长 / r²</span><div class="compact-inputs"><input id="emmaxPruneWindow" type="number" min="5" value="50"><input id="emmaxPruneStep" type="number" min="1" value="5"><input id="emmaxPruneR2" type="number" min="0.01" max="0.99" step="0.01" value="0.20"></div></label>
+              </div>
+              <label class="check-option"><input id="emmaxKeepIntermediates" type="checkbox"><span><b>保留 PLINK/TPED 中间文件</b><small>默认完成后删除大型中间文件，只保留压缩全结果、图和报告</small></span></label>
+              <div class="button-row"><button class="secondary hidden" id="emmaxCancelBtn">取消任务</button><button class="primary" id="emmaxRunBtn">运行全基因组 EMMAX</button></div>
+              <div id="emmaxRunResult" class="result-body empty-state">复用上方 VCF、表型、表型名/前缀、筛选和输出目录。</div>
+            </details>
           </section>
         </div>
         <div id="variantPhenotypeResult" class="result-body empty-state">尚未运行位点 × 表型关联分析。</div>
